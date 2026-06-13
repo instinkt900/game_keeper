@@ -12,13 +12,21 @@ cp .env.example .env          # then fill in DISCORD_TOKEN / WATCH_GUILD_ID / WA
 
 # Run the bot
 .venv/bin/python bot.py
+
+# Or with Docker (database persists on the game-keeper-data volume)
+docker compose up -d --build
 ```
+
+Discord commands: `!games <window>` (e.g. `5d`, `12h`; default `7d`),
+`!remove <link|id>` (delete a game and its mentions), `!refresh` (re-fetch
+details for every stored game).
 
 There is no test suite or linter configured yet. Pure logic (link parsing,
 `parse_duration`, the DB layer with an in-memory `Database(':memory:')`) is
 importable without Discord credentials and can be exercised directly with
 `.venv/bin/python -c "..."`; only `bot.py`'s module-level code requires the
-env vars to be set.
+env vars to be set. The dev pattern in this repo has been to verify changes
+this way and against a throwaway DB before touching the real `games.db`.
 
 ## Architecture
 
@@ -34,7 +42,10 @@ flat structure:
   IDs from message text (handles both `store.steampowered.com` and
   `steamcommunity.com` `/app/<id>` URLs, deduped in order); `fetch_game_details`
   calls Steam's public `appdetails` endpoint and returns a `GameDetails`
-  dataclass, or `None` for delisted/region-locked apps.
+  dataclass, or `None` for delisted/region-locked apps. Review standing comes
+  from a *separate* endpoint (`appreviews`) via `fetch_review_summary`, which is
+  tri-state: `None` = request failed (caller keeps stored value), `(None, total,
+  None)` = genuinely no reviews, `(summary, total, pct)` = usable standing.
 - **`db.py`** — synchronous `sqlite3`, schema created on construction. Two
   tables: `games` (one row per app, upserted to the latest details) and
   `mentions` (one row per link occurrence). They are separate because a game is
@@ -45,7 +56,10 @@ flat structure:
 
 Data flow: Steam link posted → `extract_app_ids` → `fetch_game_details` →
 `upsert_game` + `record_mention` → 🎮 reaction. Recall: `!games <window>` →
-`parse_duration` → `games_since(now - delta)`.
+`parse_duration` → `games_since(now - delta)` → for each game shown, refresh
+review standing live (`fetch_review_summary` + `update_reviews`) → one embed per
+game. Recall is intentionally live-at-call for reviews (sentiment drifts);
+price/header image stay as snapshots from ingest/`!refresh`.
 
 ## Conventions and gotchas
 
@@ -59,3 +73,14 @@ Data flow: Steam link posted → `extract_app_ids` → `fetch_game_details` →
   days. Add new units in `_UNIT_SECONDS` and the regex together.
 - Config is environment-driven via `.env` (loaded by `python-dotenv`); the three
   required vars raise `KeyError` at import if missing, which is intentional.
+  `DB_PATH` defaults to `games.db`; Docker overrides it to `/data/games.db`.
+- **Schema changes use the migration hooks in `db.py`, not just the `CREATE
+  TABLE` DDL.** `CREATE TABLE IF NOT EXISTS` does not alter existing databases,
+  so adding a column means appending to `_MIGRATIONS` (keyed by column name →
+  `ALTER TABLE … ADD COLUMN`), and removing one means adding it to
+  `_DROPPED_COLUMNS`. `_migrate()` reconciles both against `PRAGMA table_info`
+  on every startup. Keep the live DDL, the migration dict, and the `GameDetails`
+  / `GameMention` dataclasses in sync.
+- `mentioned_by` in recall is built with `GROUP_CONCAT(m.user_name, char(31))`
+  (unit separator, not comma) so display names containing commas survive; it's
+  split and de-duped in `_unique`.
