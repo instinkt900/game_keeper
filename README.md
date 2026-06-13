@@ -28,6 +28,9 @@ bare number means days). `!games` is a terse one-line-per-game list, while
 `!details` shows each game's price, current review standing (pulled live from
 Steam at recall time), header image, and app id for use with `!remove`.
 
+In both lists, each person's name links to their first message mentioning that
+game, so you can jump back to the original context.
+
 ## Setup
 
 1. Create a bot application at https://discord.com/developers/applications and

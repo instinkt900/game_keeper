@@ -163,9 +163,9 @@ async def games(ctx: commands.Context, window: str = "7d") -> None:
     results.sort(key=lambda g: g.name.lower())
     lines = [f"**Games mentioned in the last {window}** ({len(results)}):"]
     for i, g in enumerate(results, start=1):
-        who = ", ".join(g.mentioned_by) if g.mentioned_by else "unknown"
-        # <url> suppresses the link preview so the list stays compact.
-        lines.append(f"{i}. **{g.name}** — <{g.url}> [{who}]")
+        who = _format_mentioners(g.mentioned_by) if g.mentioned_by else "unknown"
+        # Names link to their first mention; the game name links to the store.
+        lines.append(f"{i}. {_md_link(g.name, g.url)} — {who}")
 
     await _send_chunked(ctx, lines)
 
@@ -251,7 +251,7 @@ def _game_embed(g) -> discord.Embed:
     if g.mentioned_by:
         embed.add_field(
             name="Mentioned by",
-            value=_truncate(", ".join(g.mentioned_by), 256),
+            value=_format_mentioners(g.mentioned_by),
             inline=False,
         )
     # Surface the app id so it's easy to copy for `!remove`. Inline code renders
@@ -286,6 +286,38 @@ def _format_review(g) -> str | None:
 def _truncate(text: str, limit: int) -> str:
     text = text.strip()
     return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _jump_url(message_id: int) -> str:
+    """Deep link to the original message. All mentions come from the one watched
+    channel, so the guild/channel ids are constants."""
+    return (
+        f"https://discord.com/channels/"
+        f"{WATCH_GUILD_ID}/{WATCH_CHANNEL_ID}/{message_id}"
+    )
+
+
+def _md_link(text: str, url: str) -> str:
+    """A masked link, escaping the brackets that would otherwise break it.
+    (Masked links render only inside embeds, not plain messages.)"""
+    safe = text.replace("[", "\\[").replace("]", "\\]")
+    return f"[{safe}]({url})"
+
+
+def _format_mentioners(mentioners, budget: int = 1000) -> str:
+    """Comma-separated links to each poster's first mention, trimmed to fit an
+    embed field/description without ever cutting a link in half."""
+    parts: list[str] = []
+    used = 0
+    for i, m in enumerate(mentioners):
+        link = _md_link(m.name, _jump_url(m.message_id))
+        extra = len(link) + (2 if parts else 0)  # ", " join
+        if used + extra > budget:
+            parts.append(f"…(+{len(mentioners) - i} more)")
+            break
+        parts.append(link)
+        used += extra
+    return ", ".join(parts)
 
 
 if __name__ == "__main__":

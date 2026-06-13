@@ -52,9 +52,21 @@ _MIGRATIONS = {
 _DROPPED_COLUMNS = ("screenshot",)
 
 
-def _unique(items: list[str]) -> list[str]:
-    """De-duplicate while preserving first-seen order."""
-    return list(dict.fromkeys(items))
+@dataclass
+class Mentioner:
+    name: str  # display name at the time of mention
+    message_id: int  # the user's earliest message linking this game
+
+
+def _parse_mentioners(concat: str | None) -> list["Mentioner"]:
+    """Decode the GROUP_CONCAT blob of "name<RS>message_id" pairs."""
+    if not concat:
+        return []
+    out: list[Mentioner] = []
+    for entry in concat.split("\x1f"):
+        name, _, message_id = entry.partition("\x1e")
+        out.append(Mentioner(name=name, message_id=int(message_id)))
+    return out
 
 
 @dataclass
@@ -70,7 +82,7 @@ class GameMention:
     review_total: int
     review_positive_pct: int | None
     mention_count: int
-    mentioned_by: list[str]  # distinct display names that posted the game
+    mentioned_by: list[Mentioner]  # distinct posters + a link target per poster
     last_mentioned: datetime
 
 
@@ -154,21 +166,35 @@ class Database:
         """Games mentioned at or after `since`, most-recently-mentioned first."""
         rows = self._conn.execute(
             """
+            -- One row per (game, poster): the poster's *earliest* mention, which
+            -- is the message we link back to for context.
+            WITH first_mention AS (
+                SELECT app_id, user_name, message_id, created_at,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY app_id, user_name
+                           ORDER BY created_at, id
+                       ) AS rn
+                FROM mentions
+                WHERE created_at >= :since
+            )
             SELECT g.app_id, g.name, g.url, g.short_description, g.price, g.is_free,
                    g.header_image,
                    g.review_summary, g.review_total, g.review_positive_pct,
                    COUNT(m.id)        AS mention_count,
                    MAX(m.created_at)  AS last_mentioned,
-                   -- join with the unit separator (char 31) so we can dedupe in
-                   -- Python without tripping over commas inside display names
-                   GROUP_CONCAT(m.user_name, char(31)) AS mentioned_by
+                   -- "name<RS>message_id" pairs joined by <US>; the control-char
+                   -- separators can't appear in display names, so splitting is safe
+                   (SELECT GROUP_CONCAT(
+                               f.user_name || char(30) || f.message_id, char(31))
+                    FROM first_mention f
+                    WHERE f.app_id = g.app_id AND f.rn = 1) AS mentioned_by
             FROM mentions m
             JOIN games g ON g.app_id = m.app_id
-            WHERE m.created_at >= ?
+            WHERE m.created_at >= :since
             GROUP BY g.app_id
             ORDER BY last_mentioned DESC
             """,
-            (since.astimezone(timezone.utc).isoformat(),),
+            {"since": since.astimezone(timezone.utc).isoformat()},
         ).fetchall()
 
         return [
@@ -184,7 +210,7 @@ class Database:
                 review_total=r["review_total"],
                 review_positive_pct=r["review_positive_pct"],
                 mention_count=r["mention_count"],
-                mentioned_by=_unique(r["mentioned_by"].split("\x1f")),
+                mentioned_by=_parse_mentioners(r["mentioned_by"]),
                 last_mentioned=datetime.fromisoformat(r["last_mentioned"]),
             )
             for r in rows

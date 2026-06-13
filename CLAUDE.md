@@ -83,6 +83,12 @@ drifts); price/header image stay as snapshots from ingest/`!refresh`.
   `_DROPPED_COLUMNS`. `_migrate()` reconciles both against `PRAGMA table_info`
   on every startup. Keep the live DDL, the migration dict, and the `GameDetails`
   / `GameMention` dataclasses in sync.
-- `mentioned_by` in recall is built with `GROUP_CONCAT(m.user_name, char(31))`
-  (unit separator, not comma) so display names containing commas survive; it's
-  split and de-duped in `_unique`.
+- `mentioned_by` in recall pairs each distinct poster with the `message_id` of
+  their *earliest* mention (a `first_mention` CTE + `ROW_NUMBER`), so names can
+  link back to the original message via `_jump_url` (guild/channel are constants
+  since only one channel is watched). The pairs are encoded as
+  `name<char30>message_id` joined by `char31` — control-char separators that
+  can't occur in display names — and decoded in `_parse_mentioners`.
+- Masked links (`[text](url)`) are used for game/poster links. They render in
+  embeds for sure; whether they render in plain-text messages (the `!games`
+  output) is a Discord behavior to confirm — if not, switch `!games` to embeds.
