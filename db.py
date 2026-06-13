@@ -52,6 +52,11 @@ _MIGRATIONS = {
 _DROPPED_COLUMNS = ("screenshot",)
 
 
+def _unique(items: list[str]) -> list[str]:
+    """De-duplicate while preserving first-seen order."""
+    return list(dict.fromkeys(items))
+
+
 @dataclass
 class GameMention:
     app_id: int
@@ -65,6 +70,7 @@ class GameMention:
     review_total: int
     review_positive_pct: int | None
     mention_count: int
+    mentioned_by: list[str]  # distinct display names that posted the game
     last_mentioned: datetime
 
 
@@ -152,7 +158,10 @@ class Database:
                    g.header_image,
                    g.review_summary, g.review_total, g.review_positive_pct,
                    COUNT(m.id)        AS mention_count,
-                   MAX(m.created_at)  AS last_mentioned
+                   MAX(m.created_at)  AS last_mentioned,
+                   -- join with the unit separator (char 31) so we can dedupe in
+                   -- Python without tripping over commas inside display names
+                   GROUP_CONCAT(m.user_name, char(31)) AS mentioned_by
             FROM mentions m
             JOIN games g ON g.app_id = m.app_id
             WHERE m.created_at >= ?
@@ -175,6 +184,7 @@ class Database:
                 review_total=r["review_total"],
                 review_positive_pct=r["review_positive_pct"],
                 mention_count=r["mention_count"],
+                mentioned_by=_unique(r["mentioned_by"].split("\x1f")),
                 last_mentioned=datetime.fromisoformat(r["last_mentioned"]),
             )
             for r in rows

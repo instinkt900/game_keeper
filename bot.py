@@ -205,6 +205,12 @@ def _game_embed(g) -> discord.Embed:
     review = _format_review(g)
     if review:
         embed.add_field(name="Reviews", value=review, inline=False)
+    if g.mentioned_by:
+        embed.add_field(
+            name="Mentioned by",
+            value=_truncate(", ".join(g.mentioned_by), 256),
+            inline=False,
+        )
     # Surface the app id so it's easy to copy for `!remove`. Inline code renders
     # as a tap-to-copy block on mobile and selects cleanly on desktop.
     embed.add_field(
