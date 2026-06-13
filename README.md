@@ -1,4 +1,4 @@
-# discord_steam_watch
+# Game Keeper
 
 A small Discord bot that watches one channel in one server for Steam store
 links, resolves each link to game details, and stores them in SQLite so they can
@@ -9,17 +9,22 @@ be recalled later.
 - Listens to a single configured channel for `store.steampowered.com/app/...`
   and `steamcommunity.com/app/...` links.
 - Looks up each game via Steam's public `appdetails` API and saves its name,
-  price, description, and image.
+  price, description, and header image.
 - Records every mention (who, when, which message), reacting with 🎮 on success.
-- Recalls games on demand:
 
-  ```
-  !games 5d     # games mentioned in the last 5 days
-  !games 12h    # last 12 hours
-  !games        # defaults to 7d
-  ```
+## Commands
 
-  Windows accept `s`, `m`, `h`, `d`, `w`; a bare number means days.
+```
+!games 5d            # games mentioned in the last 5 days
+!games 12h           # last 12 hours
+!games               # defaults to 7d
+!remove <link|id>    # delete a game and all its mentions (e.g. !remove 268130)
+!refresh             # re-fetch details for every stored game
+```
+
+`!games` windows accept `s`, `m`, `h`, `d`, `w`; a bare number means days. Each
+result shows the game's price, current review standing (pulled live from Steam
+at recall time), header image, and app id for use with `!remove`.
 
 ## Setup
 
