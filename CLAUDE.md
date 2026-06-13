@@ -17,9 +17,10 @@ cp .env.example .env          # then fill in DISCORD_TOKEN / WATCH_GUILD_ID / WA
 docker compose up -d --build
 ```
 
-Discord commands: `!games <window>` (e.g. `5d`, `12h`; default `7d`),
-`!remove <link|id>` (delete a game and its mentions), `!refresh` (re-fetch
-details for every stored game).
+Discord commands (windows: `5d`, `12h`, …; default `7d`): `!games <window>`
+(compact A–Z list — name, link, who added it) and `!details <window>` (rich
+per-game embeds, with live review refresh); `!remove <link|id>` (delete a game
+and its mentions); `!refresh` (re-fetch details for every stored game).
 
 There is no test suite or linter configured yet. Pure logic (link parsing,
 `parse_duration`, the DB layer with an in-memory `Database(':memory:')`) is
@@ -55,11 +56,12 @@ flat structure:
   mentions.
 
 Data flow: Steam link posted → `extract_app_ids` → `fetch_game_details` →
-`upsert_game` + `record_mention` → 🎮 reaction. Recall: `!games <window>` →
-`parse_duration` → `games_since(now - delta)` → for each game shown, refresh
-review standing live (`fetch_review_summary` + `update_reviews`) → one embed per
-game. Recall is intentionally live-at-call for reviews (sentiment drifts);
-price/header image stay as snapshots from ingest/`!refresh`.
+`upsert_game` + `record_mention` → 🎮 reaction. Recall: both `!games` and
+`!details` run `parse_duration` → `games_since(now - delta)`. `!details` then
+refreshes review standing live per game (`fetch_review_summary` +
+`update_reviews`) and renders one embed each; `!games` just sorts A–Z and sends
+a compact text list. Review refresh is intentionally live-at-call (sentiment
+drifts); price/header image stay as snapshots from ingest/`!refresh`.
 
 ## Conventions and gotchas
 

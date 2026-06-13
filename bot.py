@@ -103,13 +103,13 @@ async def _handle_steam_links(message: discord.Message) -> None:
         await message.add_reaction("🎮")
 
 
-@bot.command(name="games")
-async def games(ctx: commands.Context, window: str = "7d") -> None:
-    """List games mentioned within a time window, e.g. `!games 5d` or `!games 12h`."""
+@bot.command(name="details")
+async def details(ctx: commands.Context, window: str = "7d") -> None:
+    """Rich, per-game recall within a time window, e.g. `!details 5d` or `!details 12h`."""
     delta = parse_duration(window)
     if delta is None:
         await ctx.send(
-            f"Couldn't read `{window}`. Try a number plus s/m/h/d/w, e.g. `!games 5d`."
+            f"Couldn't read `{window}`. Try a number plus s/m/h/d/w, e.g. `!details 5d`."
         )
         return
 
@@ -119,9 +119,11 @@ async def games(ctx: commands.Context, window: str = "7d") -> None:
         await ctx.send(f"No games mentioned in the last {window}.")
         return
 
-    # One embed per game so each can carry its own header image. Cap the count so
-    # a busy window doesn't spam the channel; Discord sends at most 10 embeds/msg.
+    # One embed per game so each can carry its own header image. Cap by recency
+    # so a busy window doesn't spam the channel (Discord sends at most 10
+    # embeds/msg), then display the kept games A–Z.
     capped = results[:MAX_GAMES_SHOWN]
+    capped.sort(key=lambda g: g.name.lower())
 
     # Review sentiment drifts over time, so pull it live at recall time (recalls
     # are infrequent). On a failed fetch we keep the stored snapshot.
@@ -137,6 +139,47 @@ async def games(ctx: commands.Context, window: str = "7d") -> None:
 
     if len(results) > MAX_GAMES_SHOWN:
         await ctx.send(f"…and {len(results) - MAX_GAMES_SHOWN} more.")
+
+
+@bot.command(name="games")
+async def games(ctx: commands.Context, window: str = "7d") -> None:
+    """Compact A–Z list of games in a window: name, link, and who added it.
+
+    The terse counterpart to `!details`, e.g. `!games 5d` or `!games 12h`.
+    """
+    delta = parse_duration(window)
+    if delta is None:
+        await ctx.send(
+            f"Couldn't read `{window}`. Try a number plus s/m/h/d/w, e.g. `!games 5d`."
+        )
+        return
+
+    since = datetime.now(timezone.utc) - delta
+    results = db.games_since(since)
+    if not results:
+        await ctx.send(f"No games mentioned in the last {window}.")
+        return
+
+    results.sort(key=lambda g: g.name.lower())
+    lines = [f"**Games mentioned in the last {window}** ({len(results)}):"]
+    for i, g in enumerate(results, start=1):
+        who = ", ".join(g.mentioned_by) if g.mentioned_by else "unknown"
+        # <url> suppresses the link preview so the list stays compact.
+        lines.append(f"{i}. **{g.name}** — <{g.url}> [{who}]")
+
+    await _send_chunked(ctx, lines)
+
+
+async def _send_chunked(ctx: commands.Context, lines: list[str]) -> None:
+    """Send lines as one or more messages, each under Discord's 2000-char limit."""
+    buffer = ""
+    for line in lines:
+        if len(buffer) + len(line) + 1 > 1900:
+            await ctx.send(buffer)
+            buffer = ""
+        buffer += ("\n" if buffer else "") + line
+    if buffer:
+        await ctx.send(buffer)
 
 
 @bot.command(name="remove")

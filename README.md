@@ -15,16 +15,18 @@ be recalled later.
 ## Commands
 
 ```
-!games 5d            # games mentioned in the last 5 days
+!games 5d            # compact A–Z list for the last 5 days: name, link, who added it
 !games 12h           # last 12 hours
 !games               # defaults to 7d
+!details 5d          # rich recall: one embed per game (price, reviews, image, app id)
 !remove <link|id>    # delete a game and all its mentions (e.g. !remove 268130)
 !refresh             # re-fetch details for every stored game
 ```
 
-`!games` windows accept `s`, `m`, `h`, `d`, `w`; a bare number means days. Each
-result shows the game's price, current review standing (pulled live from Steam
-at recall time), header image, and app id for use with `!remove`.
+`!games` and `!details` take the same time window (`s`, `m`, `h`, `d`, `w`; a
+bare number means days). `!games` is a terse one-line-per-game list, while
+`!details` shows each game's price, current review standing (pulled live from
+Steam at recall time), header image, and app id for use with `!remove`.
 
 ## Setup
 
