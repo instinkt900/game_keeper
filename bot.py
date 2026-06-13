@@ -164,8 +164,9 @@ async def games(ctx: commands.Context, window: str = "7d") -> None:
     lines = [f"**Games mentioned in the last {window}** ({len(results)}):"]
     for i, g in enumerate(results, start=1):
         who = _format_mentioners(g.mentioned_by) if g.mentioned_by else "unknown"
-        # Names link to their first mention; the game name links to the store.
-        lines.append(f"{i}. {_md_link(g.name, g.url)} — {who}")
+        # <url> shows the plain link without a preview embed; the bracket chars
+        # are escaped so the masked name-links inside them render cleanly.
+        lines.append(f"{i}. **{g.name}** — <{g.url}> \\[{who}\\]")
 
     await _send_chunked(ctx, lines)
 

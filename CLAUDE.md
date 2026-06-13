@@ -89,6 +89,10 @@ drifts); price/header image stay as snapshots from ingest/`!refresh`.
   since only one channel is watched). The pairs are encoded as
   `name<char30>message_id` joined by `char31` — control-char separators that
   can't occur in display names — and decoded in `_parse_mentioners`.
-- Masked links (`[text](url)`) are used for game/poster links. They render in
-  embeds for sure; whether they render in plain-text messages (the `!games`
-  output) is a Discord behavior to confirm — if not, switch `!games` to embeds.
+- The compact `!games` list is plain text and must look like
+  `**Name** — <store_url> \[poster-links\]`: the game URL stays wrapped in
+  `<...>` to suppress the per-game store preview embed, and the surrounding
+  brackets are backslash-escaped so the masked poster links inside them render
+  cleanly (an unescaped `[` collides with masked-link syntax). Masked links do
+  render in plain messages here. Don't make the game name itself a masked link —
+  a bare URL in `[name](url)` re-triggers the preview embeds.
