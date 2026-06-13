@@ -1,0 +1,17 @@
+services:
+  bot:
+    build: .
+    container_name: game-keeper
+    restart: unless-stopped
+    # Reads DISCORD_TOKEN, WATCH_GUILD_ID, WATCH_CHANNEL_ID (and optional
+    # COMMAND_PREFIX) from your local .env file.
+    env_file: .env
+    # Override DB_PATH so the database lands on the persistent volume below,
+    # regardless of what .env says.
+    environment:
+      DB_PATH: /data/games.db
+    volumes:
+      - game-keeper-data:/data
+
+volumes:
+  game-keeper-data:

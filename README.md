@@ -50,3 +50,18 @@ at recall time), header image, and app id for use with `!remove`.
    ```
 
 The SQLite database is created automatically at `DB_PATH` (default `games.db`).
+
+## Running with Docker
+
+With your `.env` filled in, build and start the bot in the background:
+
+```bash
+docker compose up -d --build
+docker compose logs -f        # follow output
+docker compose down           # stop
+```
+
+The database is stored on a named volume (`game-keeper-data`, mounted at
+`/data`), so it survives container restarts and rebuilds. The container reads
+your credentials from `.env`; `DB_PATH` is set to `/data/games.db` automatically
+by the compose file.
