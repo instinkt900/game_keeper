@@ -6,9 +6,15 @@ from dataclasses import dataclass
 
 import aiohttp
 
-# Matches store.steampowered.com/app/<appid> and steamcommunity.com/app/<appid>
+# Matches store.steampowered.com/app/<appid> (any trailing slug) and the bare
+# steamcommunity.com/app/<appid> hub. The negative lookahead excludes community
+# sub-sections like /discussions/, /workshop/, /guides/ — those link to a thread
+# *about* a game, not a recommendation of it, so they must not capture the app.
 _STEAM_APP_RE = re.compile(
-    r"https?://(?:store\.steampowered\.com|steamcommunity\.com)/app/(\d+)",
+    r"https?://(?:"
+    r"store\.steampowered\.com/app/(\d+)"
+    r"|steamcommunity\.com/app/(\d+)(?!\d|/\S)"
+    r")",
     re.IGNORECASE,
 )
 
@@ -34,7 +40,8 @@ def extract_app_ids(text: str) -> list[int]:
     """Return the distinct Steam app IDs referenced in a block of text, in order."""
     seen: dict[int, None] = {}
     for match in _STEAM_APP_RE.finditer(text):
-        seen.setdefault(int(match.group(1)), None)
+        app_id = match.group(1) or match.group(2)
+        seen.setdefault(int(app_id), None)
     return list(seen)
 
 
