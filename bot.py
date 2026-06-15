@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
 import discord
+from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 
@@ -23,6 +25,9 @@ load_dotenv()
 TOKEN = os.environ["DISCORD_TOKEN"]
 WATCH_GUILD_ID = int(os.environ["WATCH_GUILD_ID"])
 WATCH_CHANNEL_ID = int(os.environ["WATCH_CHANNEL_ID"])
+# Slash commands are registered to this one guild so syncs land instantly
+# (global syncs take up to an hour to propagate).
+WATCH_GUILD = discord.Object(id=WATCH_GUILD_ID)
 COMMAND_PREFIX = os.environ.get("COMMAND_PREFIX", "!")
 DB_PATH = os.environ.get("DB_PATH", "games.db")
 
@@ -54,6 +59,8 @@ db = Database(DB_PATH)
 @bot.event
 async def setup_hook() -> None:
     bot.http_session = aiohttp.ClientSession()
+    # Push the slash-command definitions to the watched guild (instant).
+    await bot.tree.sync(guild=WATCH_GUILD)
 
 
 @bot.event
@@ -103,25 +110,42 @@ async def _handle_steam_links(message: discord.Message) -> None:
         await message.add_reaction("🎮")
 
 
-@bot.command(name="details")
-async def details(ctx: commands.Context, window: str = "7d") -> None:
-    """Rich, per-game recall within a time window, e.g. `!details 5d` or `!details 12h`."""
+# --- Command core -----------------------------------------------------------
+# The actual recall/remove/refresh logic lives in builder functions that return
+# a list of `_Outbound` messages, decoupled from how they're delivered. Prefix
+# commands send them to the channel; slash commands send them back to the
+# invoking user as ephemeral followups. This keeps the two front-ends in sync.
+
+
+@dataclass
+class _Outbound:
+    """One message to deliver: text, embeds, or both."""
+    content: str | None = None
+    embeds: list[discord.Embed] = field(default_factory=list)
+
+
+def _bad_window(window: str) -> list[_Outbound]:
+    return [
+        _Outbound(
+            content=f"Couldn't read `{window}`. Try a number plus s/m/h/d/w, e.g. `5d`."
+        )
+    ]
+
+
+async def _build_details(window: str) -> list[_Outbound]:
+    """Rich, per-game recall within a time window."""
     delta = parse_duration(window)
     if delta is None:
-        await ctx.send(
-            f"Couldn't read `{window}`. Try a number plus s/m/h/d/w, e.g. `!details 5d`."
-        )
-        return
+        return _bad_window(window)
 
     since = datetime.now(timezone.utc) - delta
     results = db.games_since(since)
     if not results:
-        await ctx.send(f"No games mentioned in the last {window}.")
-        return
+        return [_Outbound(content=f"No games mentioned in the last {window}.")]
 
     # One embed per game so each can carry its own header image. Cap by recency
-    # so a busy window doesn't spam the channel (Discord sends at most 10
-    # embeds/msg), then display the kept games A–Z.
+    # so a busy window doesn't spam (Discord sends at most 10 embeds/msg), then
+    # display the kept games A–Z.
     capped = results[:MAX_GAMES_SHOWN]
     capped.sort(key=lambda g: g.name.lower())
 
@@ -133,32 +157,26 @@ async def details(ctx: commands.Context, window: str = "7d") -> None:
             g.review_summary, g.review_total, g.review_positive_pct = reviews
             db.update_reviews(g.app_id, *reviews)
 
-    await ctx.send(f"**Games mentioned in the last {window}** ({len(capped)} shown):")
+    messages = [
+        _Outbound(content=f"**Games mentioned in the last {window}** ({len(capped)} shown):")
+    ]
     for i in range(0, len(capped), 10):
-        await ctx.send(embeds=[_game_embed(g) for g in capped[i : i + 10]])
-
+        messages.append(_Outbound(embeds=[_game_embed(g) for g in capped[i : i + 10]]))
     if len(results) > MAX_GAMES_SHOWN:
-        await ctx.send(f"…and {len(results) - MAX_GAMES_SHOWN} more.")
+        messages.append(_Outbound(content=f"…and {len(results) - MAX_GAMES_SHOWN} more."))
+    return messages
 
 
-@bot.command(name="games")
-async def games(ctx: commands.Context, window: str = "7d") -> None:
-    """Compact A–Z list of games in a window: name, link, and who added it.
-
-    The terse counterpart to `!details`, e.g. `!games 5d` or `!games 12h`.
-    """
+def _build_games(window: str) -> list[_Outbound]:
+    """Compact A–Z list of games in a window: name, link, and who added it."""
     delta = parse_duration(window)
     if delta is None:
-        await ctx.send(
-            f"Couldn't read `{window}`. Try a number plus s/m/h/d/w, e.g. `!games 5d`."
-        )
-        return
+        return _bad_window(window)
 
     since = datetime.now(timezone.utc) - delta
     results = db.games_since(since)
     if not results:
-        await ctx.send(f"No games mentioned in the last {window}.")
-        return
+        return [_Outbound(content=f"No games mentioned in the last {window}.")]
 
     results.sort(key=lambda g: g.name.lower())
     lines = [f"**Games mentioned in the last {window}** ({len(results)}):"]
@@ -168,36 +186,18 @@ async def games(ctx: commands.Context, window: str = "7d") -> None:
         # are escaped so the masked name-links inside them render cleanly.
         lines.append(f"{i}. **{g.name}** — <{g.url}> \\[{who}\\]")
 
-    await _send_chunked(ctx, lines)
+    return [_Outbound(content=chunk) for chunk in _chunk_lines(lines)]
 
 
-async def _send_chunked(ctx: commands.Context, lines: list[str]) -> None:
-    """Send lines as one or more messages, each under Discord's 2000-char limit."""
-    buffer = ""
-    for line in lines:
-        if len(buffer) + len(line) + 1 > 1900:
-            await ctx.send(buffer)
-            buffer = ""
-        buffer += ("\n" if buffer else "") + line
-    if buffer:
-        await ctx.send(buffer)
-
-
-@bot.command(name="remove")
-async def remove(ctx: commands.Context, *, target: str = "") -> None:
-    """Remove game(s) from the list by Steam link or app id, e.g. `!remove 268130`.
-
-    Deletes the game and all of its recorded mentions, so it disappears from
-    every recall window. Accepts multiple links/ids in one call.
-    """
+def _build_remove(target: str) -> list[_Outbound]:
+    """Remove game(s) by Steam link or app id, with all of their mentions."""
     app_ids = steam.extract_app_ids(target)
     # Also accept bare numeric app ids (e.g. "268130 440") alongside full links.
     app_ids += [int(tok) for tok in target.split() if tok.isdigit()]
     app_ids = list(dict.fromkeys(app_ids))  # de-dup, preserve order
 
     if not app_ids:
-        await ctx.send("Usage: `!remove <steam link or app id>`, e.g. `!remove 268130`.")
-        return
+        return [_Outbound(content="Usage: provide a Steam link or app id, e.g. `268130`.")]
 
     removed: list[str] = []
     missing: list[int] = []
@@ -213,30 +213,142 @@ async def remove(ctx: commands.Context, *, target: str = "") -> None:
         lines.append("🗑️ Removed: " + ", ".join(f"**{n}**" for n in removed))
     if missing:
         lines.append("Not in the list: " + ", ".join(f"`{a}`" for a in missing))
-    await ctx.send("\n".join(lines))
+    return [_Outbound(content="\n".join(lines))]
 
 
-@bot.command(name="refresh")
-async def refresh(ctx: commands.Context) -> None:
-    """Re-fetch Steam details (header image, reviews, price) for every stored game.
-
-    Useful after adding new fields, so older entries get backfilled without
-    needing the link to be posted again.
-    """
+async def _refresh_all() -> tuple[int, int]:
+    """Re-fetch Steam details for every stored game. Returns (updated, total)."""
     app_ids = db.all_app_ids()
-    if not app_ids:
-        await ctx.send("No games stored yet.")
-        return
-
-    notice = await ctx.send(f"Refreshing {len(app_ids)} game(s)…")
     updated = 0
     for app_id in app_ids:
         details = await steam.fetch_game_details(bot.http_session, app_id)
         if details is not None:
             db.upsert_game(details)
             updated += 1
+    return updated, len(app_ids)
 
-    await notice.edit(content=f"Refreshed {updated}/{len(app_ids)} game(s).")
+
+def _chunk_lines(lines: list[str]) -> list[str]:
+    """Group lines into messages each under Discord's 2000-char limit."""
+    chunks: list[str] = []
+    buffer = ""
+    for line in lines:
+        if len(buffer) + len(line) + 1 > 1900:
+            chunks.append(buffer)
+            buffer = ""
+        buffer += ("\n" if buffer else "") + line
+    if buffer:
+        chunks.append(buffer)
+    return chunks
+
+
+async def _send_ctx(ctx: commands.Context, messages: list[_Outbound]) -> None:
+    for m in messages:
+        kwargs = {}
+        if m.content is not None:
+            kwargs["content"] = m.content
+        if m.embeds:
+            kwargs["embeds"] = m.embeds
+        await ctx.send(**kwargs)
+
+
+async def _send_interaction(
+    interaction: discord.Interaction, messages: list[_Outbound]
+) -> None:
+    for m in messages:
+        kwargs = {"ephemeral": True}
+        if m.content is not None:
+            kwargs["content"] = m.content
+        if m.embeds:
+            kwargs["embeds"] = m.embeds
+        await interaction.followup.send(**kwargs)
+
+
+# --- Prefix commands (post to the channel) ----------------------------------
+
+
+@bot.command(name="details")
+async def details(ctx: commands.Context, window: str = "7d") -> None:
+    """Rich, per-game recall within a time window, e.g. `!details 5d`."""
+    await _send_ctx(ctx, await _build_details(window))
+
+
+@bot.command(name="games")
+async def games(ctx: commands.Context, window: str = "7d") -> None:
+    """Compact A–Z list of games in a window, e.g. `!games 5d`."""
+    await _send_ctx(ctx, _build_games(window))
+
+
+@bot.command(name="remove")
+async def remove(ctx: commands.Context, *, target: str = "") -> None:
+    """Remove game(s) by Steam link or app id, e.g. `!remove 268130`."""
+    await _send_ctx(ctx, _build_remove(target))
+
+
+@bot.command(name="refresh")
+async def refresh(ctx: commands.Context) -> None:
+    """Re-fetch Steam details (header image, reviews, price) for every stored game."""
+    app_ids = db.all_app_ids()
+    if not app_ids:
+        await ctx.send("No games stored yet.")
+        return
+    notice = await ctx.send(f"Refreshing {len(app_ids)} game(s)…")
+    updated, total = await _refresh_all()
+    await notice.edit(content=f"Refreshed {updated}/{total} game(s).")
+
+
+# --- Slash commands (reply privately to the invoking user) ------------------
+# Each defers ephemerally first: the recall/refresh paths hit Steam's API and
+# would otherwise blow past the 3-second interaction-response deadline.
+
+
+@bot.tree.command(
+    name="details",
+    description="Rich, per-game recall of games posted in a time window (private reply)",
+    guild=WATCH_GUILD,
+)
+@app_commands.describe(window="Time window like 5d, 12h, 1w (default 7d)")
+async def slash_details(interaction: discord.Interaction, window: str = "7d") -> None:
+    await interaction.response.defer(ephemeral=True)
+    await _send_interaction(interaction, await _build_details(window))
+
+
+@bot.tree.command(
+    name="games",
+    description="Compact A–Z list of games posted in a time window (private reply)",
+    guild=WATCH_GUILD,
+)
+@app_commands.describe(window="Time window like 5d, 12h, 1w (default 7d)")
+async def slash_games(interaction: discord.Interaction, window: str = "7d") -> None:
+    await interaction.response.defer(ephemeral=True)
+    await _send_interaction(interaction, _build_games(window))
+
+
+@bot.tree.command(
+    name="remove",
+    description="Remove game(s) from the list by Steam link or app id (private reply)",
+    guild=WATCH_GUILD,
+)
+@app_commands.describe(target="Steam link(s) or app id(s), e.g. 268130")
+async def slash_remove(interaction: discord.Interaction, target: str) -> None:
+    await interaction.response.defer(ephemeral=True)
+    await _send_interaction(interaction, _build_remove(target))
+
+
+@bot.tree.command(
+    name="refresh",
+    description="Re-fetch Steam details for every stored game (private reply)",
+    guild=WATCH_GUILD,
+)
+async def slash_refresh(interaction: discord.Interaction) -> None:
+    await interaction.response.defer(ephemeral=True)
+    updated, total = await _refresh_all()
+    if total == 0:
+        await interaction.followup.send("No games stored yet.", ephemeral=True)
+    else:
+        await interaction.followup.send(
+            f"Refreshed {updated}/{total} game(s).", ephemeral=True
+        )
 
 
 def _game_embed(g) -> discord.Embed:
