@@ -38,6 +38,11 @@ CREATE TABLE IF NOT EXISTS mentions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_mentions_created_at ON mentions(created_at);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 """
 
 
@@ -253,6 +258,28 @@ class Database:
         """Every app currently stored, for backfilling/refreshing details."""
         rows = self._conn.execute("SELECT app_id FROM games ORDER BY app_id").fetchall()
         return [r["app_id"] for r in rows]
+
+    def all_games(self) -> list[GameMention]:
+        """Every stored game with its mention info (for random suggestions)."""
+        return self.games_since(datetime.fromtimestamp(0, timezone.utc))
+
+    def get_setting(self, key: str) -> str | None:
+        """Read a persisted key/value setting, or None if unset."""
+        row = self._conn.execute(
+            "SELECT value FROM settings WHERE key=?", (key,)
+        ).fetchone()
+        return row["value"] if row else None
+
+    def set_setting(self, key: str, value: str) -> None:
+        """Persist a key/value setting, overwriting any existing value."""
+        self._conn.execute(
+            """
+            INSERT INTO settings (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            """,
+            (key, value),
+        )
+        self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()

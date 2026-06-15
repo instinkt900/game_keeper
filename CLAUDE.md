@@ -27,6 +27,12 @@ the channel; both front-ends share the same core logic (see Architecture). The
 bot must be invited with the `applications.commands` OAuth scope for the slash
 commands to appear.
 
+An optional weekly **game-night announcement** posts to the watched channel
+(default Friday 4pm AEST) with three random games rendered in the compact-list
+format. It's off by default and toggled with the `/announce_enable [day] [at]`,
+`/announce_disable`, and `/announce_status` slash commands; the on/off flag,
+weekday, and time persist in the DB `settings` table.
+
 There is no test suite or linter configured yet. Pure logic (link parsing,
 `parse_duration`, the DB layer with an in-memory `Database(':memory:')`) is
 importable without Discord credentials and can be exercised directly with
@@ -81,6 +87,20 @@ drifts); price/header image stay as snapshots from ingest/`!refresh`.
   command's behavior, edit the `_build_*` function so both stay in sync — don't
   reimplement logic in a handler. Slash handlers must `defer(ephemeral=True)`
   before any Steam fetch, or the 3-second interaction deadline is missed.
+- **The game-night announcement is a self-gating daily loop, not a cron.**
+  `announce_loop` (`discord.ext.tasks`) wakes once a day at the configured
+  wall-clock time, then returns early unless the stored `announce_enabled` flag
+  is `"1"` *and* today is the stored `announce_weekday` (default Friday). It's
+  `start()`ed unconditionally in `setup_hook`; enable/disable is just a
+  `settings` write, so there's no loop to stop/restart. The day and time are
+  set via `/announce_enable`'s optional `day`/`at` args; changing the time also
+  calls `announce_loop.change_interval(time=…)` to move the daily wake-up (the
+  weekday is just a gate, so it needs no loop change). The
+  timezone is fixed to `Australia/Brisbane` — that's AEST (UTC+10) year-round
+  with no DST, so "4pm AEST" stays 4pm; using a DST-observing zone like
+  `Australia/Sydney` would shift the wall-clock time half the year. Requires the
+  `tzdata` package for `ZoneInfo` on slim images. The announcement reuses
+  `_compact_line` so it matches `!games` exactly — keep them sharing it.
 - **Timestamps are always stored as ISO-8601 UTC.** `record_mention` uses
   `message.created_at` (the Discord message time, not "now"), and all
   comparisons normalize via `.astimezone(timezone.utc)`. Keep this invariant —

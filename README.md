@@ -40,6 +40,27 @@ recall time), header image, and app id for use with `remove`.
 In both lists, each person's name links to their first message mentioning that
 game, so you can jump back to the original context.
 
+### Weekly game-night suggestions
+
+The bot can post an automated message to the watched channel — by default every
+**Friday at 4pm AEST** — that picks three random games from the list and shows
+them in the same compact format (number, name, link, who suggested it). It's off
+until you enable it:
+
+```
+/announce_enable                      # turn it on (keeps the current day/time)
+/announce_enable at:18:30             # turn it on and set the time to 18:30 AEST
+/announce_enable day:Wednesday        # turn it on and announce on Wednesdays
+/announce_enable day:Sunday at:20:00  # set both at once
+/announce_disable                     # turn it off
+/announce_status                      # show whether it's on, and the day/time
+```
+
+`day` is a dropdown of Monday–Sunday; `at` is a 24-hour `HH:MM` time in AEST
+(UTC+10, no daylight saving). Both are optional — omit one to leave it unchanged.
+The on/off state, day, and time are stored in the database, so they survive
+restarts. It fires once a week on the chosen day.
+
 ## Setup
 
 1. Create a bot application at https://discord.com/developers/applications and

@@ -6,15 +6,18 @@ recalled with the `!games` command, e.g. `!games 5d` for the last 5 days.
 """
 from __future__ import annotations
 
+import calendar
 import os
+import random
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time as dtime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import aiohttp
 import discord
 from discord import app_commands
-from discord.ext import commands
+from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
 import steam
@@ -33,6 +36,15 @@ DB_PATH = os.environ.get("DB_PATH", "games.db")
 
 # Cap how many games a single !games call will render (each is its own embed).
 MAX_GAMES_SHOWN = 20
+
+# Weekly "game night" announcement. The time-of-day is configurable at runtime
+# (stored in the DB); the timezone and weekday are fixed. Australia/Brisbane is
+# AEST (UTC+10) year-round with no daylight saving, so 4pm always means 4pm AEST.
+ANNOUNCE_TZ = ZoneInfo("Australia/Brisbane")
+DEFAULT_ANNOUNCE_WEEKDAY = 4  # Monday=0 … Friday=4 (the stored default)
+DEFAULT_ANNOUNCE_TIME = "16:00"  # HH:MM, 24-hour
+ANNOUNCE_PICKS = 3
+_HHMM_RE = re.compile(r"^\s*([01]?\d|2[0-3]):([0-5]\d)\s*$")
 
 # e.g. "5d", "12h", "1w", "30m". Bare number defaults to days.
 _DURATION_RE = re.compile(r"^\s*(\d+)\s*([smhdw]?)\s*$", re.IGNORECASE)
@@ -61,6 +73,10 @@ async def setup_hook() -> None:
     bot.http_session = aiohttp.ClientSession()
     # Push the slash-command definitions to the watched guild (instant).
     await bot.tree.sync(guild=WATCH_GUILD)
+    # Always run the weekly announcement loop; it self-gates on the stored
+    # enabled flag, so toggling is just a DB write. Point it at the stored time.
+    announce_loop.change_interval(time=_stored_announce_time())
+    announce_loop.start()
 
 
 @bot.event
@@ -180,13 +196,18 @@ def _build_games(window: str) -> list[_Outbound]:
 
     results.sort(key=lambda g: g.name.lower())
     lines = [f"**Games mentioned in the last {window}** ({len(results)}):"]
-    for i, g in enumerate(results, start=1):
-        who = _format_mentioners(g.mentioned_by) if g.mentioned_by else "unknown"
-        # <url> shows the plain link without a preview embed; the bracket chars
-        # are escaped so the masked name-links inside them render cleanly.
-        lines.append(f"{i}. **{g.name}** — <{g.url}> \\[{who}\\]")
-
+    lines += [_compact_line(i, g) for i, g in enumerate(results, start=1)]
     return [_Outbound(content=chunk) for chunk in _chunk_lines(lines)]
+
+
+def _compact_line(index: int, g) -> str:
+    """One game as `N. **Name** — <url> \\[posters\\]` (the compact list format).
+
+    The store URL stays wrapped in <...> to suppress its preview embed, and the
+    surrounding brackets are escaped so the masked poster links render cleanly.
+    """
+    who = _format_mentioners(g.mentioned_by) if g.mentioned_by else "unknown"
+    return f"{index}. **{g.name}** — <{g.url}> \\[{who}\\]"
 
 
 def _build_remove(target: str) -> list[_Outbound]:
@@ -349,6 +370,137 @@ async def slash_refresh(interaction: discord.Interaction) -> None:
         await interaction.followup.send(
             f"Refreshed {updated}/{total} game(s).", ephemeral=True
         )
+
+
+# --- Weekly game-night announcement -----------------------------------------
+# A daily loop fires at the configured wall-clock time; it only posts on the
+# announce weekday (Friday) and only while the stored flag is set. The time is
+# changed at runtime via change_interval (see the announce slash commands).
+
+
+def _stored_announce_hhmm() -> tuple[int, int]:
+    raw = db.get_setting("announce_time") or DEFAULT_ANNOUNCE_TIME
+    hh, mm = raw.split(":")
+    return int(hh), int(mm)
+
+
+def _stored_announce_weekday() -> int:
+    raw = db.get_setting("announce_weekday")
+    return int(raw) if raw is not None else DEFAULT_ANNOUNCE_WEEKDAY
+
+
+def _stored_announce_time() -> dtime:
+    hh, mm = _stored_announce_hhmm()
+    return dtime(hour=hh, minute=mm, tzinfo=ANNOUNCE_TZ)
+
+
+def _parse_hhmm(text: str) -> tuple[int, int] | None:
+    match = _HHMM_RE.match(text)
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2))
+
+
+def _announcement_lines(picks) -> list[str]:
+    """The game-night message: a header plus compact-list lines for each pick."""
+    lines = ["🎲 **Time to choose the game for tonight!** Here are some suggestions:"]
+    lines += [_compact_line(i, g) for i, g in enumerate(picks, start=1)]
+    lines.append("Or use `!games` for more suggestions.")
+    return lines
+
+
+@tasks.loop(time=dtime(hour=16, minute=0, tzinfo=ANNOUNCE_TZ))
+async def announce_loop() -> None:
+    if db.get_setting("announce_enabled") != "1":
+        return
+    if datetime.now(ANNOUNCE_TZ).weekday() != _stored_announce_weekday():
+        return
+
+    channel = bot.get_channel(WATCH_CHANNEL_ID)
+    if channel is None:
+        return
+    games = db.all_games()
+    if not games:
+        return
+
+    picks = random.sample(games, min(ANNOUNCE_PICKS, len(games)))
+    await channel.send("\n".join(_announcement_lines(picks)))
+
+
+@announce_loop.before_loop
+async def _before_announce() -> None:
+    await bot.wait_until_ready()
+
+
+@bot.tree.command(
+    name="announce_enable",
+    description="Enable the weekly game-night suggestions (optionally set day/time)",
+    guild=WATCH_GUILD,
+)
+@app_commands.describe(
+    day="Optional day of week to announce on",
+    at="Optional announce time as 24-hour HH:MM AEST, e.g. 16:00",
+)
+@app_commands.choices(
+    day=[app_commands.Choice(name=calendar.day_name[i], value=i) for i in range(7)]
+)
+async def slash_announce_enable(
+    interaction: discord.Interaction,
+    day: app_commands.Choice[int] | None = None,
+    at: str | None = None,
+) -> None:
+    if at is not None:
+        parsed = _parse_hhmm(at)
+        if parsed is None:
+            await interaction.response.send_message(
+                f"Couldn't read `{at}`. Use a 24-hour time like `16:00`.",
+                ephemeral=True,
+            )
+            return
+        hh, mm = parsed
+        db.set_setting("announce_time", f"{hh:02d}:{mm:02d}")
+        announce_loop.change_interval(time=dtime(hour=hh, minute=mm, tzinfo=ANNOUNCE_TZ))
+
+    if day is not None:
+        db.set_setting("announce_weekday", str(day.value))
+
+    db.set_setting("announce_enabled", "1")
+    wd = _stored_announce_weekday()
+    hh, mm = _stored_announce_hhmm()
+    await interaction.response.send_message(
+        f"✅ Game-night suggestions **enabled** — every **{calendar.day_name[wd]} at "
+        f"{hh:02d}:{mm:02d} AEST** in <#{WATCH_CHANNEL_ID}>.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
+    name="announce_disable",
+    description="Disable the Friday game-night suggestions",
+    guild=WATCH_GUILD,
+)
+async def slash_announce_disable(interaction: discord.Interaction) -> None:
+    db.set_setting("announce_enabled", "0")
+    await interaction.response.send_message(
+        "🛑 Game-night suggestions **disabled**.", ephemeral=True
+    )
+
+
+@bot.tree.command(
+    name="announce_status",
+    description="Show whether the weekly game-night suggestions are on, and when",
+    guild=WATCH_GUILD,
+)
+async def slash_announce_status(interaction: discord.Interaction) -> None:
+    enabled = db.get_setting("announce_enabled") == "1"
+    wd = _stored_announce_weekday()
+    hh, mm = _stored_announce_hhmm()
+    state = "**enabled**" if enabled else "**disabled**"
+    await interaction.response.send_message(
+        f"Game-night suggestions are {state} — set for **{calendar.day_name[wd]} "
+        f"{hh:02d}:{mm:02d} AEST** in <#{WATCH_CHANNEL_ID}>.",
+        ephemeral=True,
+    )
 
 
 def _game_embed(g) -> discord.Embed:

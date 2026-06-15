@@ -1,3 +1,4 @@
 discord.py>=2.3,<3
 aiohttp>=3.9
 python-dotenv>=1.0
+tzdata>=2024.1  # ZoneInfo("Australia/Brisbane") on images without system tz data
