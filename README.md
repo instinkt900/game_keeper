@@ -14,6 +14,8 @@ be recalled later.
 
 ## Commands
 
+Every command exists in two forms with identical behavior:
+
 ```
 !games 5d            # compact A–Z list for the last 5 days: name, link, who added it
 !games 12h           # last 12 hours
@@ -23,10 +25,17 @@ be recalled later.
 !refresh             # re-fetch details for every stored game
 ```
 
-`!games` and `!details` take the same time window (`s`, `m`, `h`, `d`, `w`; a
-bare number means days). `!games` is a terse one-line-per-game list, while
-`!details` shows each game's price, current review standing (pulled live from
-Steam at recall time), header image, and app id for use with `!remove`.
+The `!`-prefixed commands post their reply in the channel. The same four are
+also registered as **slash commands** — `/games`, `/details`, `/remove`,
+`/refresh` — which reply **privately to you (ephemeral)** instead of posting to
+the channel, so you can browse the list without cluttering it. They take the
+same `window`/`target` arguments, surfaced as typed fields in Discord's command
+UI.
+
+`games`/`details` take the same time window (`s`, `m`, `h`, `d`, `w`; a bare
+number means days). `games` is a terse one-line-per-game list, while `details`
+shows each game's price, current review standing (pulled live from Steam at
+recall time), header image, and app id for use with `remove`.
 
 In both lists, each person's name links to their first message mentioning that
 game, so you can jump back to the original context.
@@ -36,6 +45,10 @@ game, so you can jump back to the original context.
 1. Create a bot application at https://discord.com/developers/applications and
    enable the **Message Content Intent** under Bot → Privileged Gateway Intents.
 2. Invite the bot to your server with permission to read the watched channel.
+   Include both the **`bot`** and **`applications.commands`** OAuth scopes (OAuth2
+   → URL Generator) — the latter is what lets the slash commands appear. If the
+   bot was already invited with only `bot`, just re-authorize with the updated
+   URL; no need to remove it first.
 3. Configure the environment:
 
    ```bash

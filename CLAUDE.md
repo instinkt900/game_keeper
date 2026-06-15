@@ -20,7 +20,12 @@ docker compose up -d --build
 Discord commands (windows: `5d`, `12h`, …; default `7d`): `!games <window>`
 (compact A–Z list — name, link, who added it) and `!details <window>` (rich
 per-game embeds, with live review refresh); `!remove <link|id>` (delete a game
-and its mentions); `!refresh` (re-fetch details for every stored game).
+and its mentions); `!refresh` (re-fetch details for every stored game). All four
+also exist as guild-scoped **slash commands** (`/games`, `/details`, `/remove`,
+`/refresh`) that reply ephemerally to the invoking user instead of posting to
+the channel; both front-ends share the same core logic (see Architecture). The
+bot must be invited with the `applications.commands` OAuth scope for the slash
+commands to appear.
 
 There is no test suite or linter configured yet. Pure logic (link parsing,
 `parse_duration`, the DB layer with an in-memory `Database(':memory:')`) is
@@ -39,6 +44,8 @@ flat structure:
   but still calls `process_commands` everywhere so `!games` works in any
   channel. Owns the shared `aiohttp.ClientSession` (created in `setup_hook`,
   attached as `bot.http_session`) and a single module-level `Database` instance.
+  `setup_hook` also `bot.tree.sync(guild=WATCH_GUILD)`s the slash commands —
+  guild-scoped so syncs are instant (global syncs take up to an hour).
 - **`steam.py`** — no Discord/DB knowledge. `extract_app_ids` pulls distinct app
   IDs from message text (handles both `store.steampowered.com` and
   `steamcommunity.com` `/app/<id>` URLs, deduped in order); `fetch_game_details`
@@ -65,6 +72,15 @@ drifts); price/header image stay as snapshots from ingest/`!refresh`.
 
 ## Conventions and gotchas
 
+- **Each command has two front-ends sharing one core.** Command logic lives in
+  `_build_games` / `_build_details` / `_build_remove` (and `_refresh_all`),
+  which return a list of `_Outbound` (content and/or embeds) and never touch
+  Discord I/O directly. The prefix command sends those via `_send_ctx` (to the
+  channel); the slash command defers ephemerally and sends via
+  `_send_interaction` (`followup.send(..., ephemeral=True)`). When changing a
+  command's behavior, edit the `_build_*` function so both stay in sync — don't
+  reimplement logic in a handler. Slash handlers must `defer(ephemeral=True)`
+  before any Steam fetch, or the 3-second interaction deadline is missed.
 - **Timestamps are always stored as ISO-8601 UTC.** `record_mention` uses
   `message.created_at` (the Discord message time, not "now"), and all
   comparisons normalize via `.astimezone(timezone.utc)`. Keep this invariant —
