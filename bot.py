@@ -50,6 +50,9 @@ _HHMM_RE = re.compile(r"^\s*([01]?\d|2[0-3]):([0-5]\d)\s*$")
 _DURATION_RE = re.compile(r"^\s*(\d+)\s*([smhdw]?)\s*$", re.IGNORECASE)
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
 
+# Windows that mean "every stored game, ignore the time filter".
+_ALL_WINDOWS = {"all", "*", "everything"}
+
 
 def parse_duration(text: str) -> timedelta | None:
     """Parse a window like '5d' or '12h' into a timedelta, or None if invalid."""
@@ -184,7 +187,22 @@ async def _build_details(window: str) -> list[_Outbound]:
 
 
 def _build_games(window: str) -> list[_Outbound]:
-    """Compact A–Z list of games in a window: name, link, and who added it."""
+    """Compact A–Z list of games in a window: name, link, and who added it.
+
+    The special window `all` ignores the time filter and lists every stored
+    game, annotating each with how long it's been on the list.
+    """
+    if window.strip().lower() in _ALL_WINDOWS:
+        results = db.all_games()
+        if not results:
+            return [_Outbound(content="No games stored yet.")]
+        results.sort(key=lambda g: g.name.lower())
+        lines = [f"**All games on the list** ({len(results)}):"]
+        lines += [
+            _compact_line(i, g, show_age=True) for i, g in enumerate(results, start=1)
+        ]
+        return [_Outbound(content=chunk) for chunk in _chunk_lines(lines)]
+
     delta = parse_duration(window)
     if delta is None:
         return _bad_window(window)
@@ -200,14 +218,48 @@ def _build_games(window: str) -> list[_Outbound]:
     return [_Outbound(content=chunk) for chunk in _chunk_lines(lines)]
 
 
-def _compact_line(index: int, g) -> str:
+def _build_suggest() -> list[_Outbound]:
+    """Random game-night picks — the same message as the weekly announcement."""
+    picks = _suggest_picks()
+    if picks is None:
+        return [_Outbound(content="No games stored yet.")]
+    return [
+        _Outbound(content="\n".join(_announcement_lines(picks, ON_DEMAND_PREAMBLE)))
+    ]
+
+
+def _compact_line(index: int, g, show_age: bool = False) -> str:
     """One game as `N. **Name** — <url> \\[posters\\]` (the compact list format).
 
     The store URL stays wrapped in <...> to suppress its preview embed, and the
     surrounding brackets are escaped so the masked poster links render cleanly.
+    With `show_age`, append how long the game has been on the list (used by
+    `!games all`).
     """
     who = _format_mentioners(g.mentioned_by) if g.mentioned_by else "unknown"
-    return f"{index}. **{g.name}** — <{g.url}> \\[{who}\\]"
+    line = f"{index}. **{g.name}** — <{g.url}> \\[{who}\\]"
+    if show_age:
+        line += f" · added {_humanize_age(g.first_mentioned)}"
+    return line
+
+
+def _humanize_age(since: datetime) -> str:
+    """Coarse 'how long ago' for a first mention, e.g. '3 months ago', 'today'."""
+    delta = datetime.now(timezone.utc) - since.astimezone(timezone.utc)
+    days = delta.days
+    if days >= 730:
+        return f"{days // 365} years ago"
+    if days >= 365:
+        return "1 year ago"
+    if days >= 60:
+        return f"{days // 30} months ago"
+    if days >= 30:
+        return "1 month ago"
+    if days >= 2:
+        return f"{days} days ago"
+    if days == 1:
+        return "1 day ago"
+    return "today"
 
 
 def _build_remove(target: str) -> list[_Outbound]:
@@ -296,7 +348,7 @@ async def details(ctx: commands.Context, window: str = "7d") -> None:
 
 @bot.command(name="games")
 async def games(ctx: commands.Context, window: str = "7d") -> None:
-    """Compact A–Z list of games in a window, e.g. `!games 5d`."""
+    """Compact A–Z list of games in a window, e.g. `!games 5d` or `!games all`."""
     await _send_ctx(ctx, _build_games(window))
 
 
@@ -316,6 +368,12 @@ async def refresh(ctx: commands.Context) -> None:
     notice = await ctx.send(f"Refreshing {len(app_ids)} game(s)…")
     updated, total = await _refresh_all()
     await notice.edit(content=f"Refreshed {updated}/{total} game(s).")
+
+
+@bot.command(name="suggest")
+async def suggest(ctx: commands.Context) -> None:
+    """Post a few random game-night suggestions (same as the weekly announcement)."""
+    await _send_ctx(ctx, _build_suggest())
 
 
 # --- Slash commands (reply privately to the invoking user) ------------------
@@ -339,7 +397,7 @@ async def slash_details(interaction: discord.Interaction, window: str = "7d") ->
     description="Compact A–Z list of games posted in a time window (private reply)",
     guild=WATCH_GUILD,
 )
-@app_commands.describe(window="Time window like 5d, 12h, 1w (default 7d)")
+@app_commands.describe(window="Time window like 5d, 12h, 1w (default 7d), or 'all'")
 async def slash_games(interaction: discord.Interaction, window: str = "7d") -> None:
     await interaction.response.defer(ephemeral=True)
     await _send_interaction(interaction, _build_games(window))
@@ -372,6 +430,16 @@ async def slash_refresh(interaction: discord.Interaction) -> None:
         )
 
 
+@bot.tree.command(
+    name="suggest",
+    description="Get a few random game-night suggestions (private reply)",
+    guild=WATCH_GUILD,
+)
+async def slash_suggest(interaction: discord.Interaction) -> None:
+    await interaction.response.defer(ephemeral=True)
+    await _send_interaction(interaction, _build_suggest())
+
+
 # --- Weekly game-night announcement -----------------------------------------
 # A daily loop fires at the configured wall-clock time; it only posts on the
 # announce weekday (Friday) and only while the stored flag is set. The time is
@@ -401,9 +469,23 @@ def _parse_hhmm(text: str) -> tuple[int, int] | None:
     return int(match.group(1)), int(match.group(2))
 
 
-def _announcement_lines(picks) -> list[str]:
+def _suggest_picks():
+    """Random sample of stored games for a suggestion, or None if none stored."""
+    games = db.all_games()
+    if not games:
+        return None
+    return random.sample(games, min(ANNOUNCE_PICKS, len(games)))
+
+
+SCHEDULED_PREAMBLE = (
+    "🎲 **Time to choose the game for tonight!** Here are some suggestions:"
+)
+ON_DEMAND_PREAMBLE = "Here are some suggestions:"
+
+
+def _announcement_lines(picks, preamble: str = SCHEDULED_PREAMBLE) -> list[str]:
     """The game-night message: a header plus compact-list lines for each pick."""
-    lines = ["🎲 **Time to choose the game for tonight!** Here are some suggestions:"]
+    lines = [preamble]
     lines += [_compact_line(i, g) for i, g in enumerate(picks, start=1)]
     lines.append("Or use `!games` for more suggestions.")
     return lines
@@ -419,11 +501,10 @@ async def announce_loop() -> None:
     channel = bot.get_channel(WATCH_CHANNEL_ID)
     if channel is None:
         return
-    games = db.all_games()
-    if not games:
+    picks = _suggest_picks()
+    if picks is None:
         return
 
-    picks = random.sample(games, min(ANNOUNCE_PICKS, len(games)))
     await channel.send("\n".join(_announcement_lines(picks)))
 
 

@@ -17,12 +17,16 @@ cp .env.example .env          # then fill in DISCORD_TOKEN / WATCH_GUILD_ID / WA
 docker compose up -d --build
 ```
 
-Discord commands (windows: `5d`, `12h`, …; default `7d`): `!games <window>`
-(compact A–Z list — name, link, who added it) and `!details <window>` (rich
+Discord commands (windows: `5d`, `12h`, …; default `7d`, or `all`): `!games
+<window>` (compact A–Z list — name, link, who added it; `!games all` drops the
+time filter, lists every stored game, and annotates each with how long it's been
+on the list) and `!details <window>` (rich
 per-game embeds, with live review refresh); `!remove <link|id>` (delete a game
-and its mentions); `!refresh` (re-fetch details for every stored game). All four
+and its mentions); `!refresh` (re-fetch details for every stored game);
+`!suggest` (a few random game-night picks, the same message the weekly
+announcement posts). All five
 also exist as guild-scoped **slash commands** (`/games`, `/details`, `/remove`,
-`/refresh`) that reply ephemerally to the invoking user instead of posting to
+`/refresh`, `/suggest`) that reply ephemerally to the invoking user instead of posting to
 the channel; both front-ends share the same core logic (see Architecture). The
 bot must be invited with the `applications.commands` OAuth scope for the slash
 commands to appear.
@@ -70,7 +74,8 @@ flat structure:
 
 Data flow: Steam link posted → `extract_app_ids` → `fetch_game_details` →
 `upsert_game` + `record_mention` → 🎮 reaction. Recall: both `!games` and
-`!details` run `parse_duration` → `games_since(now - delta)`. `!details` then
+`!details` run `parse_duration` → `games_since(now - delta)` (except `!games
+all`, which skips the filter and uses `db.all_games()`). `!details` then
 refreshes review standing live per game (`fetch_review_summary` +
 `update_reviews`) and renders one embed each; `!games` just sorts A–Z and sends
 a compact text list. Review refresh is intentionally live-at-call (sentiment
@@ -100,7 +105,11 @@ drifts); price/header image stay as snapshots from ingest/`!refresh`.
   with no DST, so "4pm AEST" stays 4pm; using a DST-observing zone like
   `Australia/Sydney` would shift the wall-clock time half the year. Requires the
   `tzdata` package for `ZoneInfo` on slim images. The announcement reuses
-  `_compact_line` so it matches `!games` exactly — keep them sharing it.
+  `_compact_line` so it matches `!games` exactly — keep them sharing it. The
+  on-demand `!suggest` / `/suggest` command and the scheduled loop both build
+  their message from the shared `_suggest_picks` (random sample) +
+  `_announcement_lines` helpers, so the two stay identical — change those, not
+  one call site.
 - **Timestamps are always stored as ISO-8601 UTC.** `record_mention` uses
   `message.created_at` (the Discord message time, not "now"), and all
   comparisons normalize via `.astimezone(timezone.utc)`. Keep this invariant —
@@ -108,7 +117,14 @@ drifts); price/header image stay as snapshots from ingest/`!refresh`.
 - **`message_content` intent is required** and must also be enabled in the
   Discord developer portal, or message text arrives empty.
 - Duration windows (`parse_duration`) accept `s/m/h/d/w`; a bare number means
-  days. Add new units in `_UNIT_SECONDS` and the regex together.
+  days. Add new units in `_UNIT_SECONDS` and the regex together. The literal
+  `all` (see `_ALL_WINDOWS`) is special-cased *before* `parse_duration` in
+  `_build_games`: it skips the time filter, calls `db.all_games()`, and renders
+  each line with `_compact_line(..., show_age=True)`, appending
+  `_humanize_age(g.first_mentioned)`. `first_mentioned` is `MIN(created_at)` from
+  the `games_since` query (a derived column, not stored — so no migration), and
+  is the only `_build_*` that uses the age annotation. `all` is `!games`-only;
+  `!details`/`_build_details` still go through `parse_duration`.
 - Config is environment-driven via `.env` (loaded by `python-dotenv`); the three
   required vars raise `KeyError` at import if missing, which is intentional.
   `DB_PATH` defaults to `games.db`; Docker overrides it to `/data/games.db`.

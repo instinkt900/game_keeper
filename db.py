@@ -89,6 +89,7 @@ class GameMention:
     mention_count: int
     mentioned_by: list[Mentioner]  # distinct posters + a link target per poster
     last_mentioned: datetime
+    first_mentioned: datetime  # earliest mention — how long it's been on the list
 
 
 class Database:
@@ -187,6 +188,7 @@ class Database:
                    g.review_summary, g.review_total, g.review_positive_pct,
                    COUNT(m.id)        AS mention_count,
                    MAX(m.created_at)  AS last_mentioned,
+                   MIN(m.created_at)  AS first_mentioned,
                    -- "name<RS>message_id" pairs joined by <US>; the control-char
                    -- separators can't appear in display names, so splitting is safe
                    (SELECT GROUP_CONCAT(
@@ -217,6 +219,7 @@ class Database:
                 mention_count=r["mention_count"],
                 mentioned_by=_parse_mentioners(r["mentioned_by"]),
                 last_mentioned=datetime.fromisoformat(r["last_mentioned"]),
+                first_mentioned=datetime.fromisoformat(r["first_mentioned"]),
             )
             for r in rows
         ]
