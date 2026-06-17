@@ -289,6 +289,69 @@ def _build_remove(target: str) -> list[_Outbound]:
     return [_Outbound(content="\n".join(lines))]
 
 
+async def _build_add(
+    target: str,
+    *,
+    user_id: int,
+    user_name: str,
+    source_id: int,
+    when: datetime,
+) -> list[_Outbound]:
+    """Add game(s) to the list by Steam link or app id, crediting the caller.
+
+    Mirrors the channel link-capture path (`_handle_steam_links`): resolve each
+    app id, upsert its details, and record a mention. Driven by the `/add` slash
+    argument rather than a posted message, so a game can be added privately
+    without pasting its link in the watched channel. (Posting the link in the
+    channel already captures it, so there's no prefix `!add` — `/add` is for the
+    add-without-posting case.)
+
+    A slash interaction has no channel message to link back to (the jump-url
+    machinery assumes the watched channel). So we store the *negated* `source_id`
+    (the interaction id) as the mention's `message_id`: still unique, so the
+    mention stays idempotent, but flagged non-linkable. Real snowflakes are
+    always positive, so a negative `message_id` can only mean "no message", and
+    the recall renderer shows these posters as plain text instead of a dead link.
+    """
+    app_ids = steam.extract_app_ids(target)
+    # Also accept bare numeric app ids (e.g. "268130 440") alongside full links.
+    app_ids += [int(tok) for tok in target.split() if tok.isdigit()]
+    app_ids = list(dict.fromkeys(app_ids))  # de-dup, preserve order
+
+    if not app_ids:
+        return [_Outbound(content="Usage: provide a Steam link or app id, e.g. `268130`.")]
+
+    already = set(db.all_app_ids())
+    added: list[str] = []
+    existing: list[str] = []
+    failed: list[int] = []
+    for app_id in app_ids:
+        details = await steam.fetch_game_details(bot.http_session, app_id)
+        if details is None:
+            failed.append(app_id)
+            continue
+        db.upsert_game(details)
+        # Record the mention regardless so the caller is credited even for a game
+        # already on the list; bucket the reply by whether it was already stored.
+        db.record_mention(
+            app_id=app_id,
+            message_id=-source_id,
+            user_id=user_id,
+            user_name=user_name,
+            when=when,
+        )
+        (existing if app_id in already else added).append(details.name)
+
+    lines: list[str] = []
+    if added:
+        lines.append("🎮 Added: " + ", ".join(f"**{n}**" for n in added))
+    if existing:
+        lines.append("Already on the list: " + ", ".join(f"**{n}**" for n in existing))
+    if failed:
+        lines.append("Couldn't find: " + ", ".join(f"`{a}`" for a in failed))
+    return [_Outbound(content="\n".join(lines))]
+
+
 async def _refresh_all() -> tuple[int, int]:
     """Re-fetch Steam details for every stored game. Returns (updated, total)."""
     app_ids = db.all_app_ids()
@@ -401,6 +464,26 @@ async def slash_details(interaction: discord.Interaction, window: str = "7d") ->
 async def slash_games(interaction: discord.Interaction, window: str = "7d") -> None:
     await interaction.response.defer(ephemeral=True)
     await _send_interaction(interaction, _build_games(window))
+
+
+@bot.tree.command(
+    name="add",
+    description="Add a game to the list by Steam link or app id (private reply)",
+    guild=WATCH_GUILD,
+)
+@app_commands.describe(target="Steam link(s) or app id(s), e.g. 268130")
+async def slash_add(interaction: discord.Interaction, target: str) -> None:
+    await interaction.response.defer(ephemeral=True)
+    await _send_interaction(
+        interaction,
+        await _build_add(
+            target,
+            user_id=interaction.user.id,
+            user_name=interaction.user.display_name,
+            source_id=interaction.id,
+            when=datetime.now(timezone.utc),
+        ),
+    )
 
 
 @bot.tree.command(
@@ -656,12 +739,17 @@ def _format_mentioners(mentioners, budget: int = 1000) -> str:
     parts: list[str] = []
     used = 0
     for i, m in enumerate(mentioners):
-        link = _md_link(m.name, _jump_url(m.message_id))
-        extra = len(link) + (2 if parts else 0)  # ", " join
+        # A negative message_id marks a command-added mention with no linkable
+        # message (see `_build_add`): render the name as plain (escaped) text.
+        if m.message_id < 0:
+            label = m.name.replace("[", "\\[").replace("]", "\\]")
+        else:
+            label = _md_link(m.name, _jump_url(m.message_id))
+        extra = len(label) + (2 if parts else 0)  # ", " join
         if used + extra > budget:
             parts.append(f"…(+{len(mentioners) - i} more)")
             break
-        parts.append(link)
+        parts.append(label)
         used += extra
     return ", ".join(parts)
 

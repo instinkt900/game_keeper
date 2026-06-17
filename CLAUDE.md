@@ -29,7 +29,9 @@ also exist as guild-scoped **slash commands** (`/games`, `/details`, `/remove`,
 `/refresh`, `/suggest`) that reply ephemerally to the invoking user instead of posting to
 the channel; both front-ends share the same core logic (see Architecture). The
 bot must be invited with the `applications.commands` OAuth scope for the slash
-commands to appear.
+commands to appear. One command is **slash-only**: `/add <link|id>` adds a game
+by link or app id without posting it in the channel (posting a Steam link
+already captures it, so there's deliberately no `!add`).
 
 An optional weekly **game-night announcement** posts to the watched channel
 (default Friday 4pm AEST) with three random games rendered in the compact-list
@@ -73,7 +75,13 @@ flat structure:
   mentions.
 
 Data flow: Steam link posted → `extract_app_ids` → `fetch_game_details` →
-`upsert_game` + `record_mention` → 🎮 reaction. Recall: both `!games` and
+`upsert_game` + `record_mention` → 🎮 reaction. `/add` (`_build_add`, slash-only)
+drives the same `upsert_game` + `record_mention` path from the slash argument
+instead of a posted message, with the actor taken from `interaction.user` rather
+than `message.author`. Because a slash interaction has no linkable channel
+message, `_build_add` stores the *negated* interaction id as the mention's
+`message_id` — it stays unique (so the mention is still idempotent) but is
+flagged non-linkable; see the `mentioned_by` note below. Recall: both `!games` and
 `!details` run `parse_duration` → `games_since(now - delta)` (except `!games
 all`, which skips the filter and uses `db.all_games()`). `!details` then
 refreshes review standing live per game (`fetch_review_summary` +
@@ -83,12 +91,13 @@ drifts); price/header image stay as snapshots from ingest/`!refresh`.
 
 ## Conventions and gotchas
 
-- **Each command has two front-ends sharing one core.** Command logic lives in
-  `_build_games` / `_build_details` / `_build_remove` (and `_refresh_all`),
-  which return a list of `_Outbound` (content and/or embeds) and never touch
-  Discord I/O directly. The prefix command sends those via `_send_ctx` (to the
+- **Most commands have two front-ends sharing one core.** Command logic lives in
+  `_build_games` / `_build_details` / `_build_remove` / `_build_add` (and
+  `_refresh_all`), which return a list of `_Outbound` (content and/or
+  embeds) and never touch Discord I/O directly. The prefix command sends those via `_send_ctx` (to the
   channel); the slash command defers ephemerally and sends via
-  `_send_interaction` (`followup.send(..., ephemeral=True)`). When changing a
+  `_send_interaction` (`followup.send(..., ephemeral=True)`). `_build_add` is the
+  exception — it has only the `/add` slash front-end (there's no `!add`). When changing a
   command's behavior, edit the `_build_*` function so both stay in sync — don't
   reimplement logic in a handler. Slash handlers must `defer(ephemeral=True)`
   before any Steam fetch, or the 3-second interaction deadline is missed.
@@ -138,7 +147,10 @@ drifts); price/header image stay as snapshots from ingest/`!refresh`.
 - `mentioned_by` in recall pairs each distinct poster with the `message_id` of
   their *earliest* mention (a `first_mention` CTE + `ROW_NUMBER`), so names can
   link back to the original message via `_jump_url` (guild/channel are constants
-  since only one channel is watched). The pairs are encoded as
+  since only one channel is watched). A **negative** `message_id` is a sentinel
+  for a `/add` mention that has no linkable message — real Discord snowflakes are
+  always positive — and `_format_mentioners` renders those posters as plain
+  (escaped) text instead of a masked link. The pairs are encoded as
   `name<char30>message_id` joined by `char31` — control-char separators that
   can't occur in display names — and decoded in `_parse_mentioners`.
 - The compact `!games` list is plain text and must look like

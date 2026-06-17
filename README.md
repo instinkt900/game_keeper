@@ -14,7 +14,7 @@ be recalled later.
 
 ## Commands
 
-Every command exists in two forms with identical behavior:
+Most commands exist in two forms with identical behavior:
 
 ```
 !games 5d            # compact A–Z list for the last 5 days: name, link, who added it
@@ -33,6 +33,13 @@ also registered as **slash commands** — `/games`, `/details`, `/remove`,
 the channel, so you can browse the list without cluttering it. They take the
 same `window`/`target` arguments, surfaced as typed fields in Discord's command
 UI.
+
+There's also a slash-only **`/add <link|id>`** for adding a game without posting
+its link in the channel (posting a Steam link in the watched channel already
+captures it, so there's no `!add`). It's handy for adding a game you found
+elsewhere, privately. Since there's no channel message behind a `/add` entry,
+your name shows as plain text in the recall list rather than a clickable
+jump-back link.
 
 `games`/`details` take the same time window (`s`, `m`, `h`, `d`, `w`; a bare
 number means days). `games` is a terse one-line-per-game list, while `details`
