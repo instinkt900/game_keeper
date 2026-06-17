@@ -24,9 +24,11 @@ on the list) and `!details <window>` (rich
 per-game embeds, with live review refresh); `!remove <link|id>` (delete a game
 and its mentions); `!refresh` (re-fetch details for every stored game);
 `!suggest` (a few random game-night picks, the same message the weekly
-announcement posts). All five
+announcement posts); `!help` (a short blurb plus the command list — our own,
+since the `Bot` is built with `help_command=None` to drop discord.py's
+default). All six
 also exist as guild-scoped **slash commands** (`/games`, `/details`, `/remove`,
-`/refresh`, `/suggest`) that reply ephemerally to the invoking user instead of posting to
+`/refresh`, `/suggest`, `/help`) that reply ephemerally to the invoking user instead of posting to
 the channel; both front-ends share the same core logic (see Architecture). The
 bot must be invited with the `applications.commands` OAuth scope for the slash
 commands to appear. One command is **slash-only**: `/add <link|id>` adds a game
@@ -92,9 +94,9 @@ drifts); price/header image stay as snapshots from ingest/`!refresh`.
 ## Conventions and gotchas
 
 - **Most commands have two front-ends sharing one core.** Command logic lives in
-  `_build_games` / `_build_details` / `_build_remove` / `_build_add` (and
-  `_refresh_all`), which return a list of `_Outbound` (content and/or
-  embeds) and never touch Discord I/O directly. The prefix command sends those via `_send_ctx` (to the
+  `_build_games` / `_build_details` / `_build_remove` / `_build_add` /
+  `_build_help` (and `_refresh_all`), which return a list of `_Outbound`
+  (content and/or embeds) and never touch Discord I/O directly. The prefix command sends those via `_send_ctx` (to the
   channel); the slash command defers ephemerally and sends via
   `_send_interaction` (`followup.send(..., ephemeral=True)`). `_build_add` is the
   exception — it has only the `/add` slash front-end (there's no `!add`). When changing a

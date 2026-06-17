@@ -67,7 +67,8 @@ def parse_duration(text: str) -> timedelta | None:
 intents = discord.Intents.default()
 intents.message_content = True  # required to read message text; enable in the dev portal
 
-bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents)
+# help_command=None drops discord.py's built-in !help so our own can take over.
+bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents, help_command=None)
 db = Database(DB_PATH)
 
 
@@ -226,6 +227,34 @@ def _build_suggest() -> list[_Outbound]:
     return [
         _Outbound(content="\n".join(_announcement_lines(picks, ON_DEMAND_PREAMBLE)))
     ]
+
+
+def _build_help() -> list[_Outbound]:
+    """A short blurb on what the bot does, then each command and its use."""
+    p = COMMAND_PREFIX
+    lines = [
+        "**Game Keeper** — I monitor the channel for Steam game mentions for "
+        "later recall.",
+        "",
+        f"**Commands** (most work as both a `{p}`-prefix message and a `/`-slash "
+        "command; slash commands reply privately to you):",
+        f"• `{p}games [window]` / `/games` — compact A–Z list of games in a time "
+        "window (`5d`, `12h`, … default `7d`, or `all` for every game with its age)",
+        f"• `{p}details [window]` / `/details` — richer per-game cards: price, live "
+        "review standing, image, and app id",
+        f"• `{p}remove <link|id>` / `/remove` — remove a game and all its mentions",
+        f"• `{p}refresh` / `/refresh` — re-fetch Steam details for every stored game",
+        f"• `{p}suggest` / `/suggest` — a few random game-night picks",
+        f"• `{p}help` / `/help` — this message",
+        "",
+        "**Slash-only:**",
+        "• `/add <link|id>` — add a game without posting its link in the channel",
+        "• `/announce_enable [day] [at]`, `/announce_disable`, `/announce_status` "
+        "— manage the weekly game-night suggestions post",
+        "",
+        "Time windows accept `s`/`m`/`h`/`d`/`w`; a bare number means days.",
+    ]
+    return [_Outbound(content="\n".join(lines))]
 
 
 def _compact_line(index: int, g, show_age: bool = False) -> str:
@@ -439,6 +468,12 @@ async def suggest(ctx: commands.Context) -> None:
     await _send_ctx(ctx, _build_suggest())
 
 
+@bot.command(name="help")
+async def help_cmd(ctx: commands.Context) -> None:
+    """Show what the bot does and list its commands."""
+    await _send_ctx(ctx, _build_help())
+
+
 # --- Slash commands (reply privately to the invoking user) ------------------
 # Each defers ephemerally first: the recall/refresh paths hit Steam's API and
 # would otherwise blow past the 3-second interaction-response deadline.
@@ -521,6 +556,16 @@ async def slash_refresh(interaction: discord.Interaction) -> None:
 async def slash_suggest(interaction: discord.Interaction) -> None:
     await interaction.response.defer(ephemeral=True)
     await _send_interaction(interaction, _build_suggest())
+
+
+@bot.tree.command(
+    name="help",
+    description="Show what the bot does and list its commands (private reply)",
+    guild=WATCH_GUILD,
+)
+async def slash_help(interaction: discord.Interaction) -> None:
+    # No Steam fetch, so respond immediately (help is a single short message).
+    await interaction.response.send_message(_build_help()[0].content, ephemeral=True)
 
 
 # --- Weekly game-night announcement -----------------------------------------
