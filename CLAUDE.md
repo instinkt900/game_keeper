@@ -115,12 +115,22 @@ drifts); price/header image stay as snapshots from ingest/`!refresh`.
   timezone is fixed to `Australia/Brisbane` — that's AEST (UTC+10) year-round
   with no DST, so "4pm AEST" stays 4pm; using a DST-observing zone like
   `Australia/Sydney` would shift the wall-clock time half the year. Requires the
-  `tzdata` package for `ZoneInfo` on slim images. The announcement reuses
-  `_compact_line` so it matches `!games` exactly — keep them sharing it. The
-  on-demand `!suggest` / `/suggest` command and the scheduled loop both build
-  their message from the shared `_suggest_picks` (random sample) +
-  `_announcement_lines` helpers, so the two stay identical — change those, not
-  one call site.
+  `tzdata` package for `ZoneInfo` on slim images. The on-demand `!suggest` /
+  `/suggest` command and the scheduled loop both build their message from the
+  shared `_suggest_picks` (random sample) + `_refresh_picks` (live re-fetch) +
+  `_announcement_message` helpers, so the two stay identical — change those, not
+  one call site. Unlike `!games` (plain text via `_compact_line`), suggestions
+  render each pick as a minimal `_suggestion_embed` — title + price (linked to
+  the store), the header/banner image, and an "added by …" line — so the title
+  image jogs the memory without the full store card. It sets only
+  title/url/image, which is what keeps Discord from expanding its own big store
+  preview (the same reason `_compact_line` wraps URLs in `<...>`).
+  `ANNOUNCE_PICKS` (3) stays well under Discord's 10-embeds cap. Suggestions are
+  the one place price is refreshed live: `_refresh_picks` re-fetches each sampled
+  game (same path as `!refresh`, scoped to the picks), upserts it, and copies the
+  fresh price/name/image onto the in-memory pick so a current sale shows — a
+  failed fetch keeps the stored snapshot. Because it fetches Steam, `_build_suggest`
+  is async and the `/suggest` handler must `defer` first.
 - **Timestamps are always stored as ISO-8601 UTC.** `record_mention` uses
   `message.created_at` (the Discord message time, not "now"), and all
   comparisons normalize via `.astimezone(timezone.utc)`. Keep this invariant —

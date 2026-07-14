@@ -219,14 +219,34 @@ def _build_games(window: str) -> list[_Outbound]:
     return [_Outbound(content=chunk) for chunk in _chunk_lines(lines)]
 
 
-def _build_suggest() -> list[_Outbound]:
+async def _build_suggest() -> list[_Outbound]:
     """Random game-night picks — the same message as the weekly announcement."""
     picks = _suggest_picks()
     if picks is None:
         return [_Outbound(content="No games stored yet.")]
-    return [
-        _Outbound(content="\n".join(_announcement_lines(picks, ON_DEMAND_PREAMBLE)))
-    ]
+    await _refresh_picks(picks)
+    return [_announcement_message(picks, ON_DEMAND_PREAMBLE)]
+
+
+async def _refresh_picks(picks) -> None:
+    """Re-fetch each pick's Steam details so the suggestion shows the live price.
+
+    Persists the fresh details (same path as `!refresh`, but scoped to the few
+    sampled games) and copies price/name/image onto the in-memory pick so the
+    embed reflects it without a re-query. A failed fetch leaves the stored
+    snapshot in place. Keep this before `_announcement_message` in both the
+    on-demand and scheduled paths so the two stay in step.
+    """
+    for g in picks:
+        details = await steam.fetch_game_details(bot.http_session, g.app_id)
+        if details is None:
+            continue
+        db.upsert_game(details)
+        g.name = details.name
+        g.url = details.url
+        g.header_image = details.header_image
+        g.is_free = details.is_free
+        g.price = details.price
 
 
 def _build_help() -> list[_Outbound]:
@@ -465,7 +485,7 @@ async def refresh(ctx: commands.Context) -> None:
 @bot.command(name="suggest")
 async def suggest(ctx: commands.Context) -> None:
     """Post a few random game-night suggestions (same as the weekly announcement)."""
-    await _send_ctx(ctx, _build_suggest())
+    await _send_ctx(ctx, await _build_suggest())
 
 
 @bot.command(name="help")
@@ -555,7 +575,7 @@ async def slash_refresh(interaction: discord.Interaction) -> None:
 )
 async def slash_suggest(interaction: discord.Interaction) -> None:
     await interaction.response.defer(ephemeral=True)
-    await _send_interaction(interaction, _build_suggest())
+    await _send_interaction(interaction, await _build_suggest())
 
 
 @bot.tree.command(
@@ -611,12 +631,15 @@ SCHEDULED_PREAMBLE = (
 ON_DEMAND_PREAMBLE = "Here are some suggestions:"
 
 
-def _announcement_lines(picks, preamble: str = SCHEDULED_PREAMBLE) -> list[str]:
-    """The game-night message: a header plus compact-list lines for each pick."""
-    lines = [preamble]
-    lines += [_compact_line(i, g) for i, g in enumerate(picks, start=1)]
-    lines.append("Or use `!games` for more suggestions.")
-    return lines
+def _announcement_message(picks, preamble: str = SCHEDULED_PREAMBLE) -> _Outbound:
+    """The game-night message: a preamble plus one banner embed per pick.
+
+    The preamble and the `!games` pointer are the message content; each pick is a
+    minimal `_suggestion_embed` so the title image shows without the full store
+    card. `ANNOUNCE_PICKS` (3) stays well under Discord's 10-embeds/message cap.
+    """
+    content = f"{preamble}\nOr use `!games` for more suggestions."
+    return _Outbound(content=content, embeds=[_suggestion_embed(g) for g in picks])
 
 
 @tasks.loop(time=dtime(hour=16, minute=0, tzinfo=ANNOUNCE_TZ))
@@ -633,7 +656,9 @@ async def announce_loop() -> None:
     if picks is None:
         return
 
-    await channel.send("\n".join(_announcement_lines(picks)))
+    await _refresh_picks(picks)
+    msg = _announcement_message(picks)
+    await channel.send(content=msg.content, embeds=msg.embeds)
 
 
 @announce_loop.before_loop
@@ -710,6 +735,25 @@ async def slash_announce_status(interaction: discord.Interaction) -> None:
         f"{hh:02d}:{mm:02d} AEST** in <#{WATCH_CHANNEL_ID}>.",
         ephemeral=True,
     )
+
+
+def _suggestion_embed(g) -> discord.Embed:
+    """Minimal card for a game-night pick: name + price (linked), the title
+    banner, and who added it.
+
+    Deliberately sparse next to `_game_embed` — the point is just the header image
+    to jog the memory of what the game is, not the full store card. Setting only
+    title/url/image keeps Discord from rendering its own big store preview (which
+    is why the compact `!games` list wraps URLs in <...> to suppress).
+    """
+    embed = discord.Embed(
+        title=f"{g.name} — {_format_price(g)}", url=g.url, color=discord.Color.blurple()
+    )
+    if g.mentioned_by:
+        embed.description = f"added by {_format_mentioners(g.mentioned_by)}"
+    if g.header_image:
+        embed.set_image(url=g.header_image)
+    return embed
 
 
 def _game_embed(g) -> discord.Embed:

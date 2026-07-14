@@ -57,7 +57,9 @@ game, so you can jump back to the original context.
 
 The bot can post an automated message to the watched channel — by default every
 **Friday at 4pm AEST** — that picks three random games from the list and shows
-them in the same compact format (number, name, link, who suggested it). You can
+each with its title/banner image, current price (re-fetched live so sales show),
+a store link, and who suggested it, to jog your memory of what the game is. You
+can
 trigger the same suggestion on demand at any time with `!suggest` / `/suggest`.
 The scheduled post is off until you enable it:
 

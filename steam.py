@@ -21,6 +21,12 @@ _STEAM_APP_RE = re.compile(
 _APPDETAILS_URL = "https://store.steampowered.com/api/appdetails"
 _APPREVIEWS_URL = "https://store.steampowered.com/appreviews/{app_id}"
 
+# Steam prices in the currency of the request's country. Without an explicit `cc`
+# Steam geolocates by outbound IP and any game lacking a price for that region
+# falls back to another currency (e.g. an unreleased title reporting JPY), so
+# pin it. This bot is Australia-based (fixed AEST clock), hence AUD.
+_DEFAULT_COUNTRY = "au"
+
 
 @dataclass
 class GameDetails:
@@ -46,13 +52,14 @@ def extract_app_ids(text: str) -> list[int]:
 
 
 async def fetch_game_details(
-    session: aiohttp.ClientSession, app_id: int
+    session: aiohttp.ClientSession, app_id: int, cc: str = _DEFAULT_COUNTRY
 ) -> GameDetails | None:
     """Look up a single app via Steam's public appdetails endpoint.
 
+    `cc` is the ISO country code that fixes the price currency (default AUD).
     Returns None if the app is missing/unavailable (e.g. region-locked, delisted).
     """
-    params = {"appids": str(app_id), "l": "english"}
+    params = {"appids": str(app_id), "cc": cc, "l": "english"}
     async with session.get(_APPDETAILS_URL, params=params) as resp:
         resp.raise_for_status()
         payload = await resp.json()
