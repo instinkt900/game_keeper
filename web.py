@@ -135,8 +135,10 @@ def index():
     tallies = db.vote_summary()
     mine = db.user_votes(int(user["id"]))
 
-    # Attach vote data to each game and sort by score (worst first, so the games
-    # nearest the cull line surface at the top), then name.
+    # Attach vote data to each game. Sort so the games *this user* hasn't voted on
+    # yet float to the top (the ones needing their attention), and games they've
+    # already voted on sink to the bottom. Within each group, keep the worst score
+    # first (nearest the cull line), then name.
     rows = []
     for game in games:
         t = tallies.get(game.app_id, {"score": 0, "up": 0, "down": 0})
@@ -149,7 +151,9 @@ def index():
                 "my_vote": mine.get(game.app_id, 0),
             }
         )
-    rows.sort(key=lambda r: (r["score"], r["game"].name.lower()))
+    rows.sort(
+        key=lambda r: (r["my_vote"] != 0, r["score"], r["game"].name.lower())
+    )
 
     return render_template(
         "index.html",
