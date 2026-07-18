@@ -35,11 +35,12 @@ per-game embeds, with live review refresh); `!remove <link|id>` (delete a game
 and its mentions); `!refresh` (re-fetch details for every stored game);
 `!suggest` (a few random game-night picks, the same message the weekly
 announcement posts); `!pick` (like `!suggest` but commits to a single game, with
-a "you will be playing…" reply); `!help` (a short blurb plus the command list —
+a "you will be playing…" reply); `!web` (advertise the voting web app's URL, from
+the optional `WEB_APP_URL`); `!help` (a short blurb plus the command list —
 our own, since the `Bot` is built with `help_command=None` to drop discord.py's
-default). All seven
+default). All eight
 also exist as guild-scoped **slash commands** (`/games`, `/details`, `/remove`,
-`/refresh`, `/suggest`, `/pick`, `/help`) that reply ephemerally to the invoking user instead of posting to
+`/refresh`, `/suggest`, `/pick`, `/web`, `/help`) that reply ephemerally to the invoking user instead of posting to
 the channel; both front-ends share the same core logic (see Architecture). The
 bot must be invited with the `applications.commands` OAuth scope for the slash
 commands to appear. One command is **slash-only**: `/add <link|id>` adds a game
@@ -163,7 +164,10 @@ drifts); price/header image stay as snapshots from ingest/`!refresh`.
   `/suggest` command and the scheduled loop both build their message from the
   shared `_suggest_picks(count)` (random sample) + `_refresh_picks` (live
   re-fetch) + `_announcement_message` helpers, so the two stay identical — change
-  those, not one call site. `!pick` / `/pick` (`_build_pick`) reuses the same
+  those, not one call site. `_announcement_message` appends a pointer to the
+  voting web app when the optional `WEB_APP_URL` env var is set (URL wrapped in
+  `<...>` to suppress its preview embed); unset, the line is omitted so the bot
+  runs fine without the web app. `!pick` / `/pick` (`_build_pick`) reuses the same
   `_suggest_picks(1)` + `_refresh_picks` + `_suggestion_embed` path for a *single*
   game, differing only in the reply wording (`PICK_PREAMBLE`, "you will be
   playing…") — so it shares the live-price refresh and adder credit for free. Unlike `!games` (plain text via `_compact_line`), suggestions

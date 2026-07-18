@@ -27,12 +27,13 @@ Most commands exist in two forms with identical behavior:
 !refresh             # re-fetch details for every stored game
 !suggest             # a few random game-night picks (same as the weekly post)
 !pick                # pick a single random game to play ("you will be playing…")
+!web                 # link to the voting web app (requires WEB_APP_URL)
 !help                # short description of the bot and a list of its commands
 ```
 
 The `!`-prefixed commands post their reply in the channel. The same six are
 also registered as **slash commands** — `/games`, `/details`, `/remove`,
-`/refresh`, `/suggest`, `/pick`, `/help` — which reply **privately to you (ephemeral)** instead of posting to
+`/refresh`, `/suggest`, `/pick`, `/web`, `/help` — which reply **privately to you (ephemeral)** instead of posting to
 the channel, so you can browse the list without cluttering it. They take the
 same `window`/`target` arguments, surfaced as typed fields in Discord's command
 UI.
@@ -65,6 +66,8 @@ each with its title/banner image, current price (re-fetched live so sales show),
 a store link, and who suggested it, to jog your memory of what the game is. You
 can
 trigger the same suggestion on demand at any time with `!suggest` / `/suggest`.
+If you set `WEB_APP_URL` (the public address of the voting web app), the message
+also links to it so people can go vote games off the list.
 The scheduled post is off until you enable it:
 
 ```

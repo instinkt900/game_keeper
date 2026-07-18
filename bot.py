@@ -33,6 +33,10 @@ WATCH_CHANNEL_ID = int(os.environ["WATCH_CHANNEL_ID"])
 WATCH_GUILD = discord.Object(id=WATCH_GUILD_ID)
 COMMAND_PREFIX = os.environ.get("COMMAND_PREFIX", "!")
 DB_PATH = os.environ.get("DB_PATH", "games.db")
+# Public URL of the companion voting web app (web.py), surfaced in suggestion
+# messages so people can go vote games off the list. Optional: the line is
+# omitted when unset (e.g. running the bot without the web app deployed).
+WEB_APP_URL = os.environ.get("WEB_APP_URL")
 
 # Cap how many games a single !games call will render (each is its own embed).
 MAX_GAMES_SHOWN = 20
@@ -310,6 +314,7 @@ def _build_help() -> list[_Outbound]:
         f"• `{p}refresh` / `/refresh` — re-fetch Steam details for every stored game",
         f"• `{p}suggest` / `/suggest` — a few random game-night picks",
         f"• `{p}pick` / `/pick` — pick a single random game to play",
+        f"• `{p}web` / `/web` — link to the voting web app",
         f"• `{p}help` / `/help` — this message",
         "",
         "**Slash-only:**",
@@ -322,6 +327,21 @@ def _build_help() -> list[_Outbound]:
         "Time windows accept `s`/`m`/`h`/`d`/`w`; a bare number means days.",
     ]
     return [_Outbound(content="\n".join(lines))]
+
+
+def _build_web() -> list[_Outbound]:
+    """Advertise the voting web app's URL, or note that it isn't configured."""
+    if not WEB_APP_URL:
+        return [_Outbound(content="The voting web app isn't configured.")]
+    return [
+        _Outbound(
+            content=(
+                f"🗳️ **Review and vote on the game list:** <{WEB_APP_URL}>\n"
+                "Sign in with Discord to thumbs-up games you want to keep and "
+                "thumbs-down ones to drop."
+            )
+        )
+    ]
 
 
 def _compact_line(index: int, g, show_age: bool = False) -> str:
@@ -541,6 +561,12 @@ async def pick(ctx: commands.Context) -> None:
     await _send_ctx(ctx, await _build_pick())
 
 
+@bot.command(name="web")
+async def web_cmd(ctx: commands.Context) -> None:
+    """Show the voting web app's URL."""
+    await _send_ctx(ctx, _build_web())
+
+
 @bot.command(name="help")
 async def help_cmd(ctx: commands.Context) -> None:
     """Show what the bot does and list its commands."""
@@ -642,6 +668,16 @@ async def slash_pick(interaction: discord.Interaction) -> None:
 
 
 @bot.tree.command(
+    name="web",
+    description="Show the voting web app's URL (private reply)",
+    guild=WATCH_GUILD,
+)
+async def slash_web(interaction: discord.Interaction) -> None:
+    # No Steam fetch, so respond immediately.
+    await interaction.response.send_message(_build_web()[0].content, ephemeral=True)
+
+
+@bot.tree.command(
     name="help",
     description="Show what the bot does and list its commands (private reply)",
     guild=WATCH_GUILD,
@@ -702,8 +738,13 @@ def _announcement_message(picks, preamble: str = SCHEDULED_PREAMBLE) -> _Outboun
     The preamble and the `!games` pointer are the message content; each pick is a
     minimal `_suggestion_embed` so the title image shows without the full store
     card. `ANNOUNCE_PICKS` (3) stays well under Discord's 10-embeds/message cap.
+    When `WEB_APP_URL` is set, a pointer to the voting web app is appended (URL
+    wrapped in <...> so it doesn't add its own preview embed).
     """
-    content = f"{preamble}\nOr use `!games` for more suggestions."
+    lines = [preamble, "Or use `!games` for more suggestions."]
+    if WEB_APP_URL:
+        lines.append(f"Review and vote on the list at <{WEB_APP_URL}>")
+    content = "\n".join(lines)
     return _Outbound(content=content, embeds=[_suggestion_embed(g) for g in picks])
 
 
