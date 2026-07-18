@@ -46,6 +46,12 @@ DEFAULT_ANNOUNCE_TIME = "16:00"  # HH:MM, 24-hour
 ANNOUNCE_PICKS = 3
 _HHMM_RE = re.compile(r"^\s*([01]?\d|2[0-3]):([0-5]\d)\s*$")
 
+# Automated vote-based culling. The companion web app (web.py) lets guild members
+# up/down-vote games; this daily loop removes any whose net score drops below the
+# threshold. Off by default; threshold and time persist in the settings table.
+DEFAULT_CULL_THRESHOLD = -3
+DEFAULT_CULL_TIME = "03:00"  # HH:MM AEST
+
 # e.g. "5d", "12h", "1w", "30m". Bare number defaults to days.
 _DURATION_RE = re.compile(r"^\s*(\d+)\s*([smhdw]?)\s*$", re.IGNORECASE)
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
@@ -81,6 +87,10 @@ async def setup_hook() -> None:
     # enabled flag, so toggling is just a DB write. Point it at the stored time.
     announce_loop.change_interval(time=_stored_announce_time())
     announce_loop.start()
+    # Same pattern for the daily vote-cull: always running, self-gates on the
+    # stored enabled flag, pointed at the stored time.
+    cull_loop.change_interval(time=_stored_cull_time())
+    cull_loop.start()
 
 
 @bot.event
@@ -271,6 +281,8 @@ def _build_help() -> list[_Outbound]:
         "• `/add <link|id>` — add a game without posting its link in the channel",
         "• `/announce_enable [day] [at]`, `/announce_disable`, `/announce_status` "
         "— manage the weekly game-night suggestions post",
+        "• `/cull_enable [threshold] [at]`, `/cull_disable`, `/cull_status` "
+        "— auto-remove games the server has down-voted (voting happens in the web app)",
         "",
         "Time windows accept `s`/`m`/`h`/`d`/`w`; a bare number means days.",
     ]
@@ -733,6 +745,120 @@ async def slash_announce_status(interaction: discord.Interaction) -> None:
     await interaction.response.send_message(
         f"Game-night suggestions are {state} — set for **{calendar.day_name[wd]} "
         f"{hh:02d}:{mm:02d} AEST** in <#{WATCH_CHANNEL_ID}>.",
+        ephemeral=True,
+    )
+
+
+# --- Vote-based auto-cull ----------------------------------------------------
+# A daily loop mirroring the announcement loop: it wakes at the configured
+# wall-clock time, returns early unless the stored `cull_enabled` flag is set,
+# then removes games whose net vote score (from the web app) is below the stored
+# threshold and reports what it dropped to the channel. Enable/disable/tune are
+# just `settings` writes; only a time change needs change_interval.
+
+
+def _stored_cull_threshold() -> int:
+    raw = db.get_setting("cull_threshold")
+    return int(raw) if raw is not None else DEFAULT_CULL_THRESHOLD
+
+
+def _stored_cull_hhmm() -> tuple[int, int]:
+    raw = db.get_setting("cull_time") or DEFAULT_CULL_TIME
+    hh, mm = raw.split(":")
+    return int(hh), int(mm)
+
+
+def _stored_cull_time() -> dtime:
+    hh, mm = _stored_cull_hhmm()
+    return dtime(hour=hh, minute=mm, tzinfo=ANNOUNCE_TZ)
+
+
+@tasks.loop(time=dtime(hour=3, minute=0, tzinfo=ANNOUNCE_TZ))
+async def cull_loop() -> None:
+    if db.get_setting("cull_enabled") != "1":
+        return
+    threshold = _stored_cull_threshold()
+    removed = db.cull_below(threshold)
+    if not removed:
+        return
+    channel = bot.get_channel(WATCH_CHANNEL_ID)
+    if channel is None:
+        return
+    names = ", ".join(f"**{n}**" for _, n in removed)
+    await channel.send(
+        f"🧹 Culled {len(removed)} game(s) with a vote score below {threshold}: {names}"
+    )
+
+
+@cull_loop.before_loop
+async def _before_cull() -> None:
+    await bot.wait_until_ready()
+
+
+@bot.tree.command(
+    name="cull_enable",
+    description="Enable daily removal of games whose vote score drops too low",
+    guild=WATCH_GUILD,
+)
+@app_commands.describe(
+    threshold="Remove games with a net vote score below this (default -3)",
+    at="Optional daily cull time as 24-hour HH:MM AEST, e.g. 03:00",
+)
+async def slash_cull_enable(
+    interaction: discord.Interaction,
+    threshold: int | None = None,
+    at: str | None = None,
+) -> None:
+    if at is not None:
+        parsed = _parse_hhmm(at)
+        if parsed is None:
+            await interaction.response.send_message(
+                f"Couldn't read `{at}`. Use a 24-hour time like `03:00`.",
+                ephemeral=True,
+            )
+            return
+        hh, mm = parsed
+        db.set_setting("cull_time", f"{hh:02d}:{mm:02d}")
+        cull_loop.change_interval(time=dtime(hour=hh, minute=mm, tzinfo=ANNOUNCE_TZ))
+
+    if threshold is not None:
+        db.set_setting("cull_threshold", str(threshold))
+
+    db.set_setting("cull_enabled", "1")
+    thr = _stored_cull_threshold()
+    hh, mm = _stored_cull_hhmm()
+    await interaction.response.send_message(
+        f"✅ Auto-cull **enabled** — games with a vote score below **{thr}** are "
+        f"removed daily at **{hh:02d}:{mm:02d} AEST**. Members vote via the web app.",
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(
+    name="cull_disable",
+    description="Disable the daily vote-based cull",
+    guild=WATCH_GUILD,
+)
+async def slash_cull_disable(interaction: discord.Interaction) -> None:
+    db.set_setting("cull_enabled", "0")
+    await interaction.response.send_message(
+        "🛑 Auto-cull **disabled**.", ephemeral=True
+    )
+
+
+@bot.tree.command(
+    name="cull_status",
+    description="Show whether the daily vote-based cull is on, and its threshold",
+    guild=WATCH_GUILD,
+)
+async def slash_cull_status(interaction: discord.Interaction) -> None:
+    enabled = db.get_setting("cull_enabled") == "1"
+    thr = _stored_cull_threshold()
+    hh, mm = _stored_cull_hhmm()
+    state = "**enabled**" if enabled else "**disabled**"
+    await interaction.response.send_message(
+        f"Auto-cull is {state} — removes games with a vote score below **{thr}** "
+        f"daily at **{hh:02d}:{mm:02d} AEST**.",
         ephemeral=True,
     )
 

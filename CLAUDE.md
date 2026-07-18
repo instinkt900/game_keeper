@@ -13,9 +13,19 @@ cp .env.example .env          # then fill in DISCORD_TOKEN / WATCH_GUILD_ID / WA
 # Run the bot
 .venv/bin/python bot.py
 
-# Or with Docker (database persists on the game-keeper-data volume)
+# Or with Docker (bot + voting web app; database persists on the game-keeper-data volume)
 docker compose up -d --build
+
+# Run the voting web app on its own (shares the bot's DB)
+.venv/bin/gunicorn -b 0.0.0.0:8000 web:app   # or .venv/bin/python web.py for dev
 ```
+
+A companion **web app** (`web.py`, Flask + Authlib) lets guild members log in
+with Discord and up/down-vote games; a daily `cull_loop` in `bot.py` removes
+games whose net score drops below a threshold. See the web-app section in
+Architecture. Staged vs. production is an env-file split (separate Discord app +
+`WEB_PORT` + `docker compose -p` project name per environment, which also
+namespaces the DB volume) — see README.
 
 Discord commands (windows: `5d`, `12h`, …; default `7d`, or `all`): `!games
 <window>` (compact A–Z list — name, link, who added it; `!games all` drops the
@@ -68,13 +78,29 @@ flat structure:
   from a *separate* endpoint (`appreviews`) via `fetch_review_summary`, which is
   tri-state: `None` = request failed (caller keeps stored value), `(None, total,
   None)` = genuinely no reviews, `(summary, total, pct)` = usable standing.
-- **`db.py`** — synchronous `sqlite3`, schema created on construction. Two
-  tables: `games` (one row per app, upserted to the latest details) and
-  `mentions` (one row per link occurrence). They are separate because a game is
+- **`db.py`** — synchronous `sqlite3`, schema created on construction. Tables:
+  `games` (one row per app, upserted to the latest details), `mentions` (one row
+  per link occurrence), `settings` (k/v), and `votes` (one row per
+  `(app_id, user_id)`, +1/-1). `games`/`mentions` are separate because a game is
   mentioned many times; recall queries `JOIN` and `GROUP BY app_id`. The
   `UNIQUE(app_id, message_id)` constraint makes `record_mention` idempotent —
   it returns `False` for a duplicate so the bot only reacts to genuinely new
-  mentions.
+  mentions. Voting (`cast_vote`/`clear_vote`/`vote_summary`/`user_votes`) and
+  `cull_below(threshold)` back the web app + cull loop; `cull_below` uses an
+  **inner** join to `votes` (only voted-on games are cull-eligible, so unvoted
+  new games are never swept) and a strict `< threshold`. The connection is opened
+  in **WAL mode** with a `busy_timeout` and `check_same_thread=False` because two
+  processes (bot + web app) and the web server's threads all share the one file.
+
+- **`web.py`** — a small Flask + Authlib app: a *second front-end onto the same
+  DB*, not Discord-aware. Members log in via Discord OAuth2 (`identify guilds`
+  scopes); the `/callback` gate only creates a session if the user is a member of
+  `WATCH_GUILD_ID`, so a non-member can neither see the list nor vote. `/` renders
+  the games (worst-score-first) with per-user vote state; `/vote` (POST,
+  CSRF-checked) toggles a +1/-1. Opens a `Database` per request via Flask's `g`,
+  closed on teardown. Requires extra env vars (`DISCORD_CLIENT_ID/SECRET`,
+  `DISCORD_REDIRECT_URI`, `WEB_SECRET_KEY`); run with gunicorn (see
+  `docker-compose.yml`'s `web` service). Templates live in `templates/`.
 
 Data flow: Steam link posted → `extract_app_ids` → `fetch_game_details` →
 `upsert_game` + `record_mention` → 🎮 reaction. `/add` (`_build_add`, slash-only)
@@ -103,6 +129,17 @@ drifts); price/header image stay as snapshots from ingest/`!refresh`.
   command's behavior, edit the `_build_*` function so both stay in sync — don't
   reimplement logic in a handler. Slash handlers must `defer(ephemeral=True)`
   before any Steam fetch, or the 3-second interaction deadline is missed.
+- **The auto-cull is a second self-gating daily loop, built exactly like the
+  announcement.** `cull_loop` wakes daily at the stored `cull_time`, returns
+  early unless `cull_enabled == "1"`, then calls `db.cull_below(cull_threshold)`
+  and reports removals to the channel. Like the announcement it's `start()`ed
+  unconditionally in `setup_hook` and pointed at the stored time via
+  `change_interval`; enable/disable/threshold are just `settings` writes
+  (`/cull_enable [threshold] [at]`, `/cull_disable`, `/cull_status`). Same
+  fixed `Australia/Brisbane` timezone as the announcement. Voting itself happens
+  only in the web app — the bot never exposes a vote command. When changing cull
+  behavior, keep the threshold semantics in `db.cull_below` (strict `<`,
+  voted-games-only), not in the loop.
 - **The game-night announcement is a self-gating daily loop, not a cron.**
   `announce_loop` (`discord.ext.tasks`) wakes once a day at the configured
   wall-clock time, then returns early unless the stored `announce_enabled` flag

@@ -1,0 +1,86 @@
+{% extends "base.html" %}
+{% block title %}Game list — Game Keeper{% endblock %}
+{% block style %}
+  .intro { color: var(--muted); font-size: 13px; margin: -8px 0 20px; }
+  ul.games { list-style: none; margin: 0; padding: 0; }
+  li.game {
+    display: flex; align-items: center; gap: 14px;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 10px 12px; margin-bottom: 10px;
+  }
+  li.game .thumb {
+    width: 92px; height: 43px; flex: none; border-radius: 5px;
+    object-fit: cover; background: var(--panel-hi);
+  }
+  li.game .meta { flex: 1 1 auto; min-width: 0; }
+  li.game .name { font-weight: 600; display: block; }
+  li.game .sub { color: var(--muted); font-size: 12px; }
+  .votes { display: flex; align-items: center; gap: 6px; flex: none; }
+  .score {
+    min-width: 32px; text-align: center; font-weight: 700; font-size: 16px;
+    font-variant-numeric: tabular-nums;
+  }
+  .score.neg { color: var(--down); }
+  .score.pos { color: var(--up); }
+  .vote-btn {
+    background: var(--panel-hi); color: var(--muted); border: 1px solid var(--line);
+    border-radius: 6px; width: 40px; height: 34px; cursor: pointer; font-size: 15px;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .vote-btn:hover { filter: brightness(1.15); }
+  .vote-btn small { font-size: 11px; margin-left: 3px; }
+  .vote-btn.up.active { background: var(--up); color: #fff; border-color: var(--up); }
+  .vote-btn.down.active { background: var(--down); color: #fff; border-color: var(--down); }
+  form.inline { margin: 0; }
+{% endblock %}
+{% block body %}
+  <header class="bar">
+    <h1>Game list <span class="who">· {{ rows|length }} games</span></h1>
+    <div class="who">
+      {{ user.name }} · <a href="{{ url_for('logout') }}">sign out</a>
+    </div>
+  </header>
+  <p class="intro">
+    Thumbs up games you want to keep, thumbs down ones to drop. Click your own
+    vote again to clear it. Lowest-scoring games are shown first.
+  </p>
+
+  {% if not rows %}
+    <p class="who">No games on the list yet.</p>
+  {% else %}
+  <ul class="games">
+    {% for r in rows %}
+    <li class="game">
+      {% if r.game.header_image %}
+        <img class="thumb" src="{{ r.game.header_image }}" alt="" loading="lazy">
+      {% else %}
+        <span class="thumb"></span>
+      {% endif %}
+      <div class="meta">
+        <a class="name" href="{{ r.game.url }}" target="_blank" rel="noopener">{{ r.game.name }}</a>
+        <span class="sub">
+          {{ '%+d' % r.score }} · {{ r.up }}▲ {{ r.down }}▼
+        </span>
+      </div>
+      <div class="votes">
+        <form class="inline" method="post" action="{{ url_for('vote') }}">
+          <input type="hidden" name="csrf" value="{{ csrf_token }}">
+          <input type="hidden" name="app_id" value="{{ r.game.app_id }}">
+          <input type="hidden" name="direction" value="1">
+          <button class="vote-btn up {{ 'active' if r.my_vote == 1 }}"
+                  title="Keep it">▲</button>
+        </form>
+        <span class="score {{ 'neg' if r.score < 0 }}{{ 'pos' if r.score > 0 }}">{{ r.score }}</span>
+        <form class="inline" method="post" action="{{ url_for('vote') }}">
+          <input type="hidden" name="csrf" value="{{ csrf_token }}">
+          <input type="hidden" name="app_id" value="{{ r.game.app_id }}">
+          <input type="hidden" name="direction" value="-1">
+          <button class="vote-btn down {{ 'active' if r.my_vote == -1 }}"
+                  title="Drop it">▼</button>
+        </form>
+      </div>
+    </li>
+    {% endfor %}
+  </ul>
+  {% endif %}
+{% endblock %}

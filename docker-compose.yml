@@ -13,5 +13,21 @@ services:
     volumes:
       - game-keeper-data:/data
 
+  # Companion voting web app. Shares the same SQLite file on the volume (WAL mode
+  # makes concurrent access with the bot safe — see db.py). Override the image's
+  # default command to run gunicorn instead of the bot.
+  web:
+    build: .
+    container_name: game-keeper-web
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DB_PATH: /data/games.db
+    command: ["gunicorn", "-b", "0.0.0.0:8000", "-w", "2", "web:app"]
+    ports:
+      - "${WEB_PORT:-8000}:8000"
+    volumes:
+      - game-keeper-data:/data
+
 volumes:
   game-keeper-data:

@@ -77,6 +77,67 @@ The scheduled post is off until you enable it:
 The on/off state, day, and time are stored in the database, so they survive
 restarts. It fires once a week on the chosen day.
 
+### Voting web app & auto-cull
+
+Because nothing is ever auto-pruned, the list grows without bound. To keep it in
+check there's a companion **web app** (`web.py`) where server members vote games
+off the list:
+
+- Members **sign in with Discord** (OAuth2). Only users who are members of the
+  watched server get in — anyone else is shown an "access denied" page and can
+  neither see the list nor vote.
+- Each member casts one **👍 +1 or 👎 −1** vote per game (click your own vote
+  again to clear it). Games are shown worst-score-first, so the ones nearest the
+  chopping block surface at the top.
+- The bot runs a daily **auto-cull** that removes any game whose net vote score
+  falls below a threshold you set, and posts what it dropped to the channel. Only
+  games that have received at least one vote are eligible, so freshly added games
+  are never swept away before anyone has seen them. It's off until enabled:
+
+  ```
+  /cull_enable                 # on, default threshold -3, daily at 03:00 AEST
+  /cull_enable threshold:-5    # on, remove games that hit a net score below -5
+  /cull_enable at:04:00        # on, run the daily cull at 04:00 AEST
+  /cull_disable                # off
+  /cull_status                 # show whether it's on, the threshold, and the time
+  ```
+
+The web app shares the bot's SQLite database, so run it alongside the bot (the
+`docker compose` setup below starts both). It needs a few extra environment
+variables — see `.env.example` (`DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET`,
+`DISCORD_REDIRECT_URI`, `WEB_SECRET_KEY`). Get the client id/secret from your
+Discord application's **OAuth2** page, and add the redirect URI (e.g.
+`http://localhost:8000/callback`) to that page's **Redirects** list — it must
+match exactly.
+
+Run it locally with:
+
+```bash
+.venv/bin/gunicorn -b 0.0.0.0:8000 web:app
+# or, for development: .venv/bin/python web.py
+```
+
+### Staging vs. production
+
+The bot and web app are configured entirely through `.env`, so running a staged
+copy against a test server and a production copy against the real one is just a
+matter of separate env files:
+
+```bash
+cp .env.example .env.staging   # test server's guild/channel + its own Discord app
+cp .env.example .env.prod      # real server's guild/channel + its own Discord app
+
+# Keep the two deployments' containers and database volumes fully separate with
+# distinct project names:
+docker compose -p gk-staging --env-file .env.staging up -d --build
+docker compose -p gk-prod    --env-file .env.prod    up -d --build
+```
+
+Give each environment its **own Discord application** (or at least its own OAuth
+redirect URI and `WEB_PORT`) so their logins and web ports don't collide. `-p`
+namespaces the containers *and* the `game-keeper-data` volume, so the staged and
+production databases never touch.
+
 ## Setup
 
 1. Create a bot application at https://discord.com/developers/applications and

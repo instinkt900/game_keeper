@@ -6,7 +6,10 @@ __pycache__/
 *.pyc
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
 .env
+.env.*
 Dockerfile
 docker-compose.yml
 .dockerignore

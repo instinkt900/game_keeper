@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Access denied — Game Keeper{% endblock %}
+{% block style %}
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 32px; text-align: center; margin-top: 48px;
+  }
+  .card p { color: var(--muted); }
+{% endblock %}
+{% block body %}
+  <div class="card">
+    <h1>Access denied</h1>
+    <p>Your Discord account isn't a member of this server, so you can't view or
+       vote on the game list.</p>
+    <p><a class="btn ghost" href="{{ url_for('index') }}">Back</a></p>
+  </div>
+{% endblock %}

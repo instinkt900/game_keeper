@@ -43,6 +43,14 @@ CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS votes (
+    app_id   INTEGER NOT NULL REFERENCES games(app_id),
+    user_id  INTEGER NOT NULL,           -- Discord user id
+    vote     INTEGER NOT NULL,           -- +1 (up) or -1 (down)
+    voted_at TEXT NOT NULL,              -- ISO-8601 UTC
+    PRIMARY KEY (app_id, user_id)        -- one current vote per user per game
+);
 """
 
 
@@ -94,8 +102,15 @@ class GameMention:
 
 class Database:
     def __init__(self, path: str):
-        self._conn = sqlite3.connect(path)
+        # The bot and the (separate-process) web app both open this same file, so
+        # run in WAL mode: readers don't block the writer and vice versa. A busy
+        # timeout lets a write wait out a concurrent one instead of raising
+        # "database is locked". check_same_thread=False lets a threaded web server
+        # reuse one connection across request threads (sqlite3 serializes calls).
+        self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.executescript(_SCHEMA)
         self._migrate()
         self._conn.commit()
@@ -252,6 +267,7 @@ class Database:
         ).fetchone()
         if row is None:
             return None
+        self._conn.execute("DELETE FROM votes WHERE app_id=?", (app_id,))
         self._conn.execute("DELETE FROM mentions WHERE app_id=?", (app_id,))
         self._conn.execute("DELETE FROM games WHERE app_id=?", (app_id,))
         self._conn.commit()
@@ -265,6 +281,80 @@ class Database:
     def all_games(self) -> list[GameMention]:
         """Every stored game with its mention info (for random suggestions)."""
         return self.games_since(datetime.fromtimestamp(0, timezone.utc))
+
+    # --- Voting (driven by the companion web app) ---------------------------
+
+    def cast_vote(self, app_id: int, user_id: int, vote: int) -> None:
+        """Record a user's +1/-1 vote for a game, replacing any prior vote."""
+        if vote not in (1, -1):
+            raise ValueError("vote must be +1 or -1")
+        self._conn.execute(
+            """
+            INSERT INTO votes (app_id, user_id, vote, voted_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(app_id, user_id) DO UPDATE SET
+                vote=excluded.vote, voted_at=excluded.voted_at
+            """,
+            (app_id, user_id, vote, datetime.now(timezone.utc).isoformat()),
+        )
+        self._conn.commit()
+
+    def clear_vote(self, app_id: int, user_id: int) -> None:
+        """Remove a user's vote for a game (un-vote / toggle off)."""
+        self._conn.execute(
+            "DELETE FROM votes WHERE app_id=? AND user_id=?", (app_id, user_id)
+        )
+        self._conn.commit()
+
+    def vote_summary(self) -> dict[int, dict[str, int]]:
+        """Per-game tallies: {app_id: {"score", "up", "down"}} for voted games.
+
+        Games with no votes are omitted; callers should treat them as all-zero.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT app_id,
+                   COALESCE(SUM(vote), 0)                        AS score,
+                   SUM(CASE WHEN vote > 0 THEN 1 ELSE 0 END)     AS up,
+                   SUM(CASE WHEN vote < 0 THEN 1 ELSE 0 END)     AS down
+            FROM votes
+            GROUP BY app_id
+            """
+        ).fetchall()
+        return {
+            r["app_id"]: {"score": r["score"], "up": r["up"], "down": r["down"]}
+            for r in rows
+        }
+
+    def user_votes(self, user_id: int) -> dict[int, int]:
+        """Map of app_id -> this user's current vote (+1/-1), for the web UI."""
+        rows = self._conn.execute(
+            "SELECT app_id, vote FROM votes WHERE user_id=?", (user_id,)
+        ).fetchall()
+        return {r["app_id"]: r["vote"] for r in rows}
+
+    def cull_below(self, threshold: int) -> list[tuple[int, str]]:
+        """Delete games whose net vote score is below `threshold`.
+
+        Only games that have received at least one vote are eligible — a game
+        nobody has voted on (score effectively 0) is never culled, so freshly
+        added games can't be swept away before anyone has seen them. Returns the
+        (app_id, name) pairs removed.
+        """
+        rows = self._conn.execute(
+            """
+            SELECT g.app_id AS app_id, g.name AS name, SUM(v.vote) AS score
+            FROM games g
+            JOIN votes v ON v.app_id = g.app_id
+            GROUP BY g.app_id
+            HAVING SUM(v.vote) < ?
+            """,
+            (threshold,),
+        ).fetchall()
+        removed = [(r["app_id"], r["name"]) for r in rows]
+        for app_id, _ in removed:
+            self.remove_game(app_id)
+        return removed
 
     def get_setting(self, key: str) -> str | None:
         """Read a persisted key/value setting, or None if unset."""

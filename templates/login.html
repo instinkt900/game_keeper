@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Sign in — Game Keeper{% endblock %}
+{% block style %}
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 32px; text-align: center; margin-top: 48px;
+  }
+  .card p { color: var(--muted); }
+{% endblock %}
+{% block body %}
+  <div class="card">
+    <h1>Game Keeper</h1>
+    <p>Sign in with Discord to see the game list and vote.<br>
+       You must be a member of the server.</p>
+    <p><a class="btn" href="{{ url_for('login') }}">Sign in with Discord</a></p>
+  </div>
+{% endblock %}
