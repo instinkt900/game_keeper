@@ -71,15 +71,12 @@ class Mentioner:
     message_id: int  # the user's earliest message linking this game
 
 
-def _parse_mentioners(concat: str | None) -> list["Mentioner"]:
-    """Decode the GROUP_CONCAT blob of "name<RS>message_id" pairs."""
-    if not concat:
-        return []
-    out: list[Mentioner] = []
-    for entry in concat.split("\x1f"):
-        name, _, message_id = entry.partition("\x1e")
-        out.append(Mentioner(name=name, message_id=int(message_id)))
-    return out
+def _parse_mentioner(value: str | None) -> "Mentioner | None":
+    """Decode a single "name<US>message_id" pair (the game's original adder)."""
+    if not value:
+        return None
+    name, _, message_id = value.partition("\x1e")
+    return Mentioner(name=name, message_id=int(message_id))
 
 
 @dataclass
@@ -95,7 +92,7 @@ class GameMention:
     review_total: int
     review_positive_pct: int | None
     mention_count: int
-    mentioned_by: list[Mentioner]  # distinct posters + a link target per poster
+    added_by: Mentioner | None  # the original adder (earliest mention) + link target
     last_mentioned: datetime
     first_mentioned: datetime  # earliest mention — how long it's been on the list
 
@@ -187,12 +184,12 @@ class Database:
         """Games mentioned at or after `since`, most-recently-mentioned first."""
         rows = self._conn.execute(
             """
-            -- One row per (game, poster): the poster's *earliest* mention, which
-            -- is the message we link back to for context.
-            WITH first_mention AS (
-                SELECT app_id, user_name, message_id, created_at,
+            -- The game's *original adder*: the single earliest mention (in the
+            -- window), whose message is what we link back to for context.
+            WITH adder AS (
+                SELECT app_id, user_name, message_id,
                        ROW_NUMBER() OVER (
-                           PARTITION BY app_id, user_name
+                           PARTITION BY app_id
                            ORDER BY created_at, id
                        ) AS rn
                 FROM mentions
@@ -204,12 +201,11 @@ class Database:
                    COUNT(m.id)        AS mention_count,
                    MAX(m.created_at)  AS last_mentioned,
                    MIN(m.created_at)  AS first_mentioned,
-                   -- "name<RS>message_id" pairs joined by <US>; the control-char
-                   -- separators can't appear in display names, so splitting is safe
-                   (SELECT GROUP_CONCAT(
-                               f.user_name || char(30) || f.message_id, char(31))
-                    FROM first_mention f
-                    WHERE f.app_id = g.app_id AND f.rn = 1) AS mentioned_by
+                   -- "name<US>message_id"; the control-char separator can't appear
+                   -- in a display name, so splitting it back apart is safe.
+                   (SELECT a.user_name || char(30) || a.message_id
+                    FROM adder a
+                    WHERE a.app_id = g.app_id AND a.rn = 1) AS added_by
             FROM mentions m
             JOIN games g ON g.app_id = m.app_id
             WHERE m.created_at >= :since
@@ -232,7 +228,7 @@ class Database:
                 review_total=r["review_total"],
                 review_positive_pct=r["review_positive_pct"],
                 mention_count=r["mention_count"],
-                mentioned_by=_parse_mentioners(r["mentioned_by"]),
+                added_by=_parse_mentioner(r["added_by"]),
                 last_mentioned=datetime.fromisoformat(r["last_mentioned"]),
                 first_mentioned=datetime.fromisoformat(r["first_mentioned"]),
             )

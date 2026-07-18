@@ -34,11 +34,12 @@ on the list) and `!details <window>` (rich
 per-game embeds, with live review refresh); `!remove <link|id>` (delete a game
 and its mentions); `!refresh` (re-fetch details for every stored game);
 `!suggest` (a few random game-night picks, the same message the weekly
-announcement posts); `!help` (a short blurb plus the command list — our own,
-since the `Bot` is built with `help_command=None` to drop discord.py's
-default). All six
+announcement posts); `!pick` (like `!suggest` but commits to a single game, with
+a "you will be playing…" reply); `!help` (a short blurb plus the command list —
+our own, since the `Bot` is built with `help_command=None` to drop discord.py's
+default). All seven
 also exist as guild-scoped **slash commands** (`/games`, `/details`, `/remove`,
-`/refresh`, `/suggest`, `/help`) that reply ephemerally to the invoking user instead of posting to
+`/refresh`, `/suggest`, `/pick`, `/help`) that reply ephemerally to the invoking user instead of posting to
 the channel; both front-ends share the same core logic (see Architecture). The
 bot must be invited with the `applications.commands` OAuth scope for the slash
 commands to appear. One command is **slash-only**: `/add <link|id>` adds a game
@@ -66,7 +67,13 @@ flat structure:
 - **`bot.py`** — entrypoint and the only Discord-aware module. The `on_message`
   handler is gated to `WATCH_GUILD_ID` + `WATCH_CHANNEL_ID` for link capture,
   but still calls `process_commands` everywhere so `!games` works in any
-  channel. Owns the shared `aiohttp.ClientSession` (created in `setup_hook`,
+  channel. Link capture is *also* skipped when the message is a valid command
+  (`ctx.valid`): otherwise `!remove <steam_url>` would capture the game from its
+  own argument's auto-embed and then remove it. Capture reacts 🎮
+  (`REACTION_ADDED`) when a genuinely new game is stored and 👀
+  (`REACTION_ALREADY`) when a linked game was already on the list — both can
+  appear on a message mixing new and already-tracked links. A mention is recorded
+  either way (the poster is credited even for an already-listed game). Owns the shared `aiohttp.ClientSession` (created in `setup_hook`,
   attached as `bot.http_session`) and a single module-level `Database` instance.
   `setup_hook` also `bot.tree.sync(guild=WATCH_GUILD)`s the slash commands —
   guild-scoped so syncs are instant (global syncs take up to an hour).
@@ -103,13 +110,13 @@ flat structure:
   `docker-compose.yml`'s `web` service). Templates live in `templates/`.
 
 Data flow: Steam link posted → `extract_app_ids` → `fetch_game_details` →
-`upsert_game` + `record_mention` → 🎮 reaction. `/add` (`_build_add`, slash-only)
+`upsert_game` + `record_mention` → 🎮 (new) / 👀 (already listed) reaction. `/add` (`_build_add`, slash-only)
 drives the same `upsert_game` + `record_mention` path from the slash argument
 instead of a posted message, with the actor taken from `interaction.user` rather
 than `message.author`. Because a slash interaction has no linkable channel
 message, `_build_add` stores the *negated* interaction id as the mention's
 `message_id` — it stays unique (so the mention is still idempotent) but is
-flagged non-linkable; see the `mentioned_by` note below. Recall: both `!games` and
+flagged non-linkable; see the `added_by` note below. Recall: both `!games` and
 `!details` run `parse_duration` → `games_since(now - delta)` (except `!games
 all`, which skips the filter and uses `db.all_games()`). `!details` then
 refreshes review standing live per game (`fetch_review_summary` +
@@ -154,9 +161,12 @@ drifts); price/header image stay as snapshots from ingest/`!refresh`.
   `Australia/Sydney` would shift the wall-clock time half the year. Requires the
   `tzdata` package for `ZoneInfo` on slim images. The on-demand `!suggest` /
   `/suggest` command and the scheduled loop both build their message from the
-  shared `_suggest_picks` (random sample) + `_refresh_picks` (live re-fetch) +
-  `_announcement_message` helpers, so the two stay identical — change those, not
-  one call site. Unlike `!games` (plain text via `_compact_line`), suggestions
+  shared `_suggest_picks(count)` (random sample) + `_refresh_picks` (live
+  re-fetch) + `_announcement_message` helpers, so the two stay identical — change
+  those, not one call site. `!pick` / `/pick` (`_build_pick`) reuses the same
+  `_suggest_picks(1)` + `_refresh_picks` + `_suggestion_embed` path for a *single*
+  game, differing only in the reply wording (`PICK_PREAMBLE`, "you will be
+  playing…") — so it shares the live-price refresh and adder credit for free. Unlike `!games` (plain text via `_compact_line`), suggestions
   render each pick as a minimal `_suggestion_embed` — title + price (linked to
   the store), the header/banner image, and an "added by …" line — so the title
   image jogs the memory without the full store card. It sets only
@@ -193,19 +203,25 @@ drifts); price/header image stay as snapshots from ingest/`!refresh`.
   `_DROPPED_COLUMNS`. `_migrate()` reconciles both against `PRAGMA table_info`
   on every startup. Keep the live DDL, the migration dict, and the `GameDetails`
   / `GameMention` dataclasses in sync.
-- `mentioned_by` in recall pairs each distinct poster with the `message_id` of
-  their *earliest* mention (a `first_mention` CTE + `ROW_NUMBER`), so names can
-  link back to the original message via `_jump_url` (guild/channel are constants
-  since only one channel is watched). A **negative** `message_id` is a sentinel
-  for a `/add` mention that has no linkable message — real Discord snowflakes are
-  always positive — and `_format_mentioners` renders those posters as plain
-  (escaped) text instead of a masked link. The pairs are encoded as
-  `name<char30>message_id` joined by `char31` — control-char separators that
-  can't occur in display names — and decoded in `_parse_mentioners`.
+- `added_by` in recall is the game's **single original adder**: the earliest
+  mention in the window (an `adder` CTE = `ROW_NUMBER` partitioned by `app_id`
+  only, `rn = 1`), so every "added by" / poster label shows just that one person,
+  linked back to the message that added the game via `_jump_url` (guild/channel
+  are constants since only one channel is watched). Everyone who *later* mentions
+  a game is still recorded as a `mentions` row (poster credit, `mention_count`),
+  but is not shown — the display is adder-only by design. Note the window caveat:
+  in a time-bounded recall (`!games 7d`) the "adder" is the earliest mention
+  *within that window*, matching `first_mentioned`; only `all`/suggestions
+  (epoch-wide) show the true all-time adder. A **negative** `message_id` is a
+  sentinel for a `/add` mention with no linkable message — real Discord snowflakes
+  are always positive — and `_format_adder` renders that adder as plain (escaped)
+  text instead of a masked link. The value is encoded as `name<char30>message_id`
+  (a control-char separator that can't occur in a display name) and decoded in
+  `_parse_mentioner`.
 - The compact `!games` list is plain text and must look like
   `**Name** — <store_url> \[poster-links\]`: the game URL stays wrapped in
   `<...>` to suppress the per-game store preview embed, and the surrounding
-  brackets are backslash-escaped so the masked poster links inside them render
+  brackets are backslash-escaped so the masked adder link inside them renders
   cleanly (an unescaped `[` collides with masked-link syntax). Masked links do
   render in plain messages here. Don't make the game name itself a masked link —
   a bare URL in `[name](url)` re-triggers the preview embeds.

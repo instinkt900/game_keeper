@@ -10,7 +10,8 @@ be recalled later.
   and `steamcommunity.com/app/...` links.
 - Looks up each game via Steam's public `appdetails` API and saves its name,
   price, description, and header image.
-- Records every mention (who, when, which message), reacting with 🎮 on success.
+- Records every mention (who, when, which message), reacting with 🎮 when a new
+  game is added, or 👀 when the linked game is already on the list.
 
 ## Commands
 
@@ -25,12 +26,13 @@ Most commands exist in two forms with identical behavior:
 !remove <link|id>    # delete a game and all its mentions (e.g. !remove 268130)
 !refresh             # re-fetch details for every stored game
 !suggest             # a few random game-night picks (same as the weekly post)
+!pick                # pick a single random game to play ("you will be playing…")
 !help                # short description of the bot and a list of its commands
 ```
 
 The `!`-prefixed commands post their reply in the channel. The same six are
 also registered as **slash commands** — `/games`, `/details`, `/remove`,
-`/refresh`, `/suggest`, `/help` — which reply **privately to you (ephemeral)** instead of posting to
+`/refresh`, `/suggest`, `/pick`, `/help` — which reply **privately to you (ephemeral)** instead of posting to
 the channel, so you can browse the list without cluttering it. They take the
 same `window`/`target` arguments, surfaced as typed fields in Discord's command
 UI.
@@ -50,8 +52,10 @@ accepts `all` (nothing is ever auto-pruned, so this is the full list), which
 drops the time filter and annotates each game with how long it's been on the
 list — handy for finding entries that have been sitting there for ages.
 
-In both lists, each person's name links to their first message mentioning that
-game, so you can jump back to the original context.
+Both lists credit the person who **added** each game (its earliest mention) and
+link that name back to the message that added it, so you can jump to the original
+context. Anyone who links a game that's already on the list is still recorded
+(and reacted to with 👀), but the credit stays with the original adder.
 
 ### Weekly game-night suggestions
 

@@ -37,6 +37,10 @@ DB_PATH = os.environ.get("DB_PATH", "games.db")
 # Cap how many games a single !games call will render (each is its own embed).
 MAX_GAMES_SHOWN = 20
 
+# Reactions left on a message that links Steam games.
+REACTION_ADDED = "🎮"    # at least one genuinely new game was captured
+REACTION_ALREADY = "👀"  # a linked game was already on the list (seen, not re-added)
+
 # Weekly "game night" announcement. The time-of-day is configurable at runtime
 # (stored in the DB); the timezone and weekday are fixed. Australia/Brisbane is
 # AEST (UTC+10) year-round with no daylight saving, so 4pm always means 4pm AEST.
@@ -100,13 +104,19 @@ async def on_ready() -> None:
 
 @bot.event
 async def on_message(message: discord.Message) -> None:
-    # Ignore the bot's own messages and anything outside the watched channel,
-    # but still let commands (e.g. !games) be processed everywhere.
+    # Ignore the bot's own messages.
     if message.author == bot.user:
         return
 
+    # A message that *is* a command must not also be treated as a link to
+    # capture: `!remove <steam_url>` would otherwise add the game from its own
+    # argument (Discord auto-embeds the link) and then immediately remove it.
+    # Only non-command messages in the watched channel capture links; commands
+    # still run everywhere via process_commands below.
+    ctx = await bot.get_context(message)
     if (
-        message.guild
+        not ctx.valid
+        and message.guild
         and message.guild.id == WATCH_GUILD_ID
         and message.channel.id == WATCH_CHANNEL_ID
     ):
@@ -120,24 +130,39 @@ async def _handle_steam_links(message: discord.Message) -> None:
     if not app_ids:
         return
 
-    stored: list[str] = []
+    # Snapshot the list *before* this message so we can tell a genuinely new game
+    # from a re-link of one already tracked (record_mention alone can't: a new
+    # message always yields a new, non-duplicate mention).
+    already = set(db.all_app_ids())
+    added = False
+    existed = False
     for app_id in app_ids:
         details = await steam.fetch_game_details(bot.http_session, app_id)
         if details is None:
             continue
+        was_present = app_id in already
         db.upsert_game(details)
-        is_new = db.record_mention(
+        # Record the mention regardless, so the poster is credited even when the
+        # game is already on the list (recall lists everyone who has mentioned it).
+        db.record_mention(
             app_id=app_id,
             message_id=message.id,
             user_id=message.author.id,
             user_name=message.author.display_name,
             when=message.created_at,
         )
-        if is_new:
-            stored.append(details.name)
+        if was_present:
+            existed = True
+        else:
+            added = True
+            already.add(app_id)
 
-    if stored:
-        await message.add_reaction("🎮")
+    # 🎮 = something new was added; 👀 = a link was already on the list. A message
+    # mixing new and already-tracked links can get both.
+    if added:
+        await message.add_reaction(REACTION_ADDED)
+    if existed:
+        await message.add_reaction(REACTION_ALREADY)
 
 
 # --- Command core -----------------------------------------------------------
@@ -238,6 +263,15 @@ async def _build_suggest() -> list[_Outbound]:
     return [_announcement_message(picks, ON_DEMAND_PREAMBLE)]
 
 
+async def _build_pick() -> list[_Outbound]:
+    """Pick a single game to play — like `!suggest`, but decides on just one."""
+    picks = _suggest_picks(1)
+    if picks is None:
+        return [_Outbound(content="No games stored yet.")]
+    await _refresh_picks(picks)
+    return [_Outbound(content=PICK_PREAMBLE, embeds=[_suggestion_embed(picks[0])])]
+
+
 async def _refresh_picks(picks) -> None:
     """Re-fetch each pick's Steam details so the suggestion shows the live price.
 
@@ -275,6 +309,7 @@ def _build_help() -> list[_Outbound]:
         f"• `{p}remove <link|id>` / `/remove` — remove a game and all its mentions",
         f"• `{p}refresh` / `/refresh` — re-fetch Steam details for every stored game",
         f"• `{p}suggest` / `/suggest` — a few random game-night picks",
+        f"• `{p}pick` / `/pick` — pick a single random game to play",
         f"• `{p}help` / `/help` — this message",
         "",
         "**Slash-only:**",
@@ -297,7 +332,7 @@ def _compact_line(index: int, g, show_age: bool = False) -> str:
     With `show_age`, append how long the game has been on the list (used by
     `!games all`).
     """
-    who = _format_mentioners(g.mentioned_by) if g.mentioned_by else "unknown"
+    who = _format_adder(g.added_by)
     line = f"{index}. **{g.name}** — <{g.url}> \\[{who}\\]"
     if show_age:
         line += f" · added {_humanize_age(g.first_mentioned)}"
@@ -500,6 +535,12 @@ async def suggest(ctx: commands.Context) -> None:
     await _send_ctx(ctx, await _build_suggest())
 
 
+@bot.command(name="pick")
+async def pick(ctx: commands.Context) -> None:
+    """Pick a single random game to play, e.g. `!pick`."""
+    await _send_ctx(ctx, await _build_pick())
+
+
 @bot.command(name="help")
 async def help_cmd(ctx: commands.Context) -> None:
     """Show what the bot does and list its commands."""
@@ -591,6 +632,16 @@ async def slash_suggest(interaction: discord.Interaction) -> None:
 
 
 @bot.tree.command(
+    name="pick",
+    description="Pick a single random game to play (private reply)",
+    guild=WATCH_GUILD,
+)
+async def slash_pick(interaction: discord.Interaction) -> None:
+    await interaction.response.defer(ephemeral=True)
+    await _send_interaction(interaction, await _build_pick())
+
+
+@bot.tree.command(
     name="help",
     description="Show what the bot does and list its commands (private reply)",
     guild=WATCH_GUILD,
@@ -629,18 +680,20 @@ def _parse_hhmm(text: str) -> tuple[int, int] | None:
     return int(match.group(1)), int(match.group(2))
 
 
-def _suggest_picks():
-    """Random sample of stored games for a suggestion, or None if none stored."""
+def _suggest_picks(count: int = ANNOUNCE_PICKS):
+    """Random sample of up to `count` stored games, or None if none stored."""
     games = db.all_games()
     if not games:
         return None
-    return random.sample(games, min(ANNOUNCE_PICKS, len(games)))
+    return random.sample(games, min(count, len(games)))
 
 
 SCHEDULED_PREAMBLE = (
     "🎲 **Time to choose the game for tonight!** Here are some suggestions:"
 )
 ON_DEMAND_PREAMBLE = "Here are some suggestions:"
+# `!pick` / `/pick` commits to a single game rather than offering a few.
+PICK_PREAMBLE = "🎯 **You will be playing…**"
 
 
 def _announcement_message(picks, preamble: str = SCHEDULED_PREAMBLE) -> _Outbound:
@@ -875,8 +928,8 @@ def _suggestion_embed(g) -> discord.Embed:
     embed = discord.Embed(
         title=f"{g.name} — {_format_price(g)}", url=g.url, color=discord.Color.blurple()
     )
-    if g.mentioned_by:
-        embed.description = f"added by {_format_mentioners(g.mentioned_by)}"
+    if g.added_by:
+        embed.description = f"added by {_format_adder(g.added_by)}"
     if g.header_image:
         embed.set_image(url=g.header_image)
     return embed
@@ -892,10 +945,10 @@ def _game_embed(g) -> discord.Embed:
     review = _format_review(g)
     if review:
         embed.add_field(name="Reviews", value=review, inline=False)
-    if g.mentioned_by:
+    if g.added_by:
         embed.add_field(
-            name="Mentioned by",
-            value=_format_mentioners(g.mentioned_by),
+            name="Added by",
+            value=_format_adder(g.added_by),
             inline=False,
         )
     # Surface the app id so it's easy to copy for `!remove`. Inline code renders
@@ -948,25 +1001,17 @@ def _md_link(text: str, url: str) -> str:
     return f"[{safe}]({url})"
 
 
-def _format_mentioners(mentioners, budget: int = 1000) -> str:
-    """Comma-separated links to each poster's first mention, trimmed to fit an
-    embed field/description without ever cutting a link in half."""
-    parts: list[str] = []
-    used = 0
-    for i, m in enumerate(mentioners):
-        # A negative message_id marks a command-added mention with no linkable
-        # message (see `_build_add`): render the name as plain (escaped) text.
-        if m.message_id < 0:
-            label = m.name.replace("[", "\\[").replace("]", "\\]")
-        else:
-            label = _md_link(m.name, _jump_url(m.message_id))
-        extra = len(label) + (2 if parts else 0)  # ", " join
-        if used + extra > budget:
-            parts.append(f"…(+{len(mentioners) - i} more)")
-            break
-        parts.append(label)
-        used += extra
-    return ", ".join(parts)
+def _format_adder(adder) -> str:
+    """A masked link to the game's original adder's message, or their plain name.
+
+    A negative message_id marks a `/add` mention with no linkable channel message
+    (see `_build_add`): render the name as plain (escaped) text in that case.
+    """
+    if adder is None:
+        return "unknown"
+    if adder.message_id < 0:
+        return adder.name.replace("[", "\\[").replace("]", "\\]")
+    return _md_link(adder.name, _jump_url(adder.message_id))
 
 
 if __name__ == "__main__":
