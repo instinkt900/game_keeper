@@ -96,7 +96,7 @@ flat structure:
   mentions. Voting (`cast_vote`/`clear_vote`/`vote_summary`/`user_votes`) and
   `cull_below(threshold)` back the web app + cull loop; `cull_below` uses an
   **inner** join to `votes` (only voted-on games are cull-eligible, so unvoted
-  new games are never swept) and a strict `< threshold`. The connection is opened
+  new games are never swept) and an inclusive `<= threshold`. The connection is opened
   in **WAL mode** with a `busy_timeout` and `check_same_thread=False` because two
   processes (bot + web app) and the web server's threads all share the one file.
 
@@ -147,7 +147,7 @@ drifts); price/header image stay as snapshots from ingest/`!refresh`.
   (`/cull_enable [threshold] [at]`, `/cull_disable`, `/cull_status`). Same
   fixed `Australia/Brisbane` timezone as the announcement. Voting itself happens
   only in the web app — the bot never exposes a vote command. When changing cull
-  behavior, keep the threshold semantics in `db.cull_below` (strict `<`,
+  behavior, keep the threshold semantics in `db.cull_below` (inclusive `<=`,
   voted-games-only), not in the loop.
 - **The game-night announcement is a self-gating daily loop, not a cron.**
   `announce_loop` (`discord.ext.tasks`) wakes once a day at the configured

@@ -330,7 +330,10 @@ class Database:
         return {r["app_id"]: r["vote"] for r in rows}
 
     def cull_below(self, threshold: int) -> list[tuple[int, str]]:
-        """Delete games whose net vote score is below `threshold`.
+        """Delete games whose net vote score is at or below `threshold`.
+
+        The comparison is inclusive (`<=`): a threshold of -2 culls a game
+        sitting at exactly -2. Keep the semantics here, not in the caller.
 
         Only games that have received at least one vote are eligible — a game
         nobody has voted on (score effectively 0) is never culled, so freshly
@@ -343,7 +346,7 @@ class Database:
             FROM games g
             JOIN votes v ON v.app_id = g.app_id
             GROUP BY g.app_id
-            HAVING SUM(v.vote) < ?
+            HAVING SUM(v.vote) <= ?
             """,
             (threshold,),
         ).fetchall()

@@ -55,7 +55,7 @@ ANNOUNCE_PICKS = 3
 _HHMM_RE = re.compile(r"^\s*([01]?\d|2[0-3]):([0-5]\d)\s*$")
 
 # Automated vote-based culling. The companion web app (web.py) lets guild members
-# up/down-vote games; this daily loop removes any whose net score drops below the
+# up/down-vote games; this daily loop removes any whose net score drops to or below the
 # threshold. Off by default; threshold and time persist in the settings table.
 DEFAULT_CULL_THRESHOLD = -3
 DEFAULT_CULL_TIME = "03:00"  # HH:MM AEST
@@ -846,7 +846,7 @@ async def slash_announce_status(interaction: discord.Interaction) -> None:
 # --- Vote-based auto-cull ----------------------------------------------------
 # A daily loop mirroring the announcement loop: it wakes at the configured
 # wall-clock time, returns early unless the stored `cull_enabled` flag is set,
-# then removes games whose net vote score (from the web app) is below the stored
+# then removes games whose net vote score (from the web app) is at or below the stored
 # threshold and reports what it dropped to the channel. Enable/disable/tune are
 # just `settings` writes; only a time change needs change_interval.
 
@@ -880,7 +880,8 @@ async def cull_loop() -> None:
         return
     names = ", ".join(f"**{n}**" for _, n in removed)
     await channel.send(
-        f"🧹 Culled {len(removed)} game(s) with a vote score below {threshold}: {names}"
+        f"🧹 Culled {len(removed)} game(s) with a vote score at or below "
+        f"{threshold}: {names}"
     )
 
 
@@ -895,7 +896,7 @@ async def _before_cull() -> None:
     guild=WATCH_GUILD,
 )
 @app_commands.describe(
-    threshold="Remove games with a net vote score below this (default -3)",
+    threshold="Remove games with a net vote score at or below this (default -3)",
     at="Optional daily cull time as 24-hour HH:MM AEST, e.g. 03:00",
 )
 async def slash_cull_enable(
@@ -922,7 +923,7 @@ async def slash_cull_enable(
     thr = _stored_cull_threshold()
     hh, mm = _stored_cull_hhmm()
     await interaction.response.send_message(
-        f"✅ Auto-cull **enabled** — games with a vote score below **{thr}** are "
+        f"✅ Auto-cull **enabled** — games with a vote score at or below **{thr}** are "
         f"removed daily at **{hh:02d}:{mm:02d} AEST**. Members vote via the web app.",
         ephemeral=True,
     )
@@ -951,7 +952,7 @@ async def slash_cull_status(interaction: discord.Interaction) -> None:
     hh, mm = _stored_cull_hhmm()
     state = "**enabled**" if enabled else "**disabled**"
     await interaction.response.send_message(
-        f"Auto-cull is {state} — removes games with a vote score below **{thr}** "
+        f"Auto-cull is {state} — removes games with a vote score at or below **{thr}** "
         f"daily at **{hh:02d}:{mm:02d} AEST**.",
         ephemeral=True,
     )
