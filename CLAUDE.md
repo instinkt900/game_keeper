@@ -104,7 +104,7 @@ flat structure:
   DB*, not Discord-aware. Members log in via Discord OAuth2 (`identify guilds`
   scopes); the `/callback` gate only creates a session if the user is a member of
   `WATCH_GUILD_ID`, so a non-member can neither see the list nor vote. `/` renders
-  the games (ones the logged-in user hasn't voted on yet first, then worst-score
+  the games (ones the logged-in user hasn't voted on yet first, then highest-score
   first within each group) with per-user vote state; `/vote` (POST,
   CSRF-checked) toggles a +1/-1. Opens a `Database` per request via Flask's `g`,
   closed on teardown. Requires extra env vars (`DISCORD_CLIENT_ID/SECRET`,
