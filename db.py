@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS games (
     header_image        TEXT,
     is_free             INTEGER NOT NULL DEFAULT 0,
     price               TEXT,
+    is_released         INTEGER NOT NULL DEFAULT 1,
     review_summary      TEXT,
     review_total        INTEGER NOT NULL DEFAULT 0,
     review_positive_pct INTEGER
@@ -56,6 +57,9 @@ CREATE TABLE IF NOT EXISTS votes (
 
 # Columns added after the initial schema; applied to pre-existing databases.
 _MIGRATIONS = {
+    # Default 1 (released): pre-existing games are assumed playable until a
+    # refresh fills in the real value, so a migration never hides an out game.
+    "is_released": "ALTER TABLE games ADD COLUMN is_released INTEGER NOT NULL DEFAULT 1",
     "review_summary": "ALTER TABLE games ADD COLUMN review_summary TEXT",
     "review_total": "ALTER TABLE games ADD COLUMN review_total INTEGER NOT NULL DEFAULT 0",
     "review_positive_pct": "ALTER TABLE games ADD COLUMN review_positive_pct INTEGER",
@@ -87,6 +91,7 @@ class GameMention:
     short_description: str
     price: str | None
     is_free: bool
+    is_released: bool
     header_image: str | None
     review_summary: str | None
     review_total: int
@@ -131,9 +136,9 @@ class Database:
         self._conn.execute(
             """
             INSERT INTO games (app_id, name, url, short_description,
-                               header_image, is_free, price,
+                               header_image, is_free, price, is_released,
                                review_summary, review_total, review_positive_pct)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(app_id) DO UPDATE SET
                 name=excluded.name,
                 url=excluded.url,
@@ -141,6 +146,7 @@ class Database:
                 header_image=excluded.header_image,
                 is_free=excluded.is_free,
                 price=excluded.price,
+                is_released=excluded.is_released,
                 review_summary=excluded.review_summary,
                 review_total=excluded.review_total,
                 review_positive_pct=excluded.review_positive_pct
@@ -153,6 +159,7 @@ class Database:
                 game.header_image,
                 int(game.is_free),
                 game.price,
+                int(game.is_released),
                 game.review_summary,
                 game.review_total,
                 game.review_positive_pct,
@@ -196,7 +203,7 @@ class Database:
                 WHERE created_at >= :since
             )
             SELECT g.app_id, g.name, g.url, g.short_description, g.price, g.is_free,
-                   g.header_image,
+                   g.is_released, g.header_image,
                    g.review_summary, g.review_total, g.review_positive_pct,
                    COUNT(m.id)        AS mention_count,
                    MAX(m.created_at)  AS last_mentioned,
@@ -223,6 +230,7 @@ class Database:
                 short_description=r["short_description"] or "",
                 price=r["price"],
                 is_free=bool(r["is_free"]),
+                is_released=bool(r["is_released"]),
                 header_image=r["header_image"],
                 review_summary=r["review_summary"],
                 review_total=r["review_total"],
@@ -272,6 +280,14 @@ class Database:
     def all_app_ids(self) -> list[int]:
         """Every app currently stored, for backfilling/refreshing details."""
         rows = self._conn.execute("SELECT app_id FROM games ORDER BY app_id").fetchall()
+        return [r["app_id"] for r in rows]
+
+    def unreleased_app_ids(self) -> list[int]:
+        """App ids stored as not-yet-released, for re-checking whether they have
+        since launched. Suggestions re-fetch exactly these before sampling."""
+        rows = self._conn.execute(
+            "SELECT app_id FROM games WHERE is_released = 0 ORDER BY app_id"
+        ).fetchall()
         return [r["app_id"] for r in rows]
 
     def all_games(self) -> list[GameMention]:

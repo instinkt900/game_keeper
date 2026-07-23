@@ -24,16 +24,15 @@ Most commands exist in two forms with identical behavior:
 !games all           # every game ever added, with how long each has been on the list
 !details 5d          # rich recall: one embed per game (price, reviews, image, app id)
 !remove <link|id>    # delete a game and all its mentions (e.g. !remove 268130)
-!refresh             # re-fetch details for every stored game
 !suggest             # a few random game-night picks (same as the weekly post)
 !pick                # pick a single random game to play ("you will be playing…")
 !web                 # link to the voting web app (requires WEB_APP_URL)
 !help                # short description of the bot and a list of its commands
 ```
 
-The `!`-prefixed commands post their reply in the channel. The same six are
+The `!`-prefixed commands post their reply in the channel. The same seven are
 also registered as **slash commands** — `/games`, `/details`, `/remove`,
-`/refresh`, `/suggest`, `/pick`, `/web`, `/help` — which reply **privately to you (ephemeral)** instead of posting to
+`/suggest`, `/pick`, `/web`, `/help` — which reply **privately to you (ephemeral)** instead of posting to
 the channel, so you can browse the list without cluttering it. They take the
 same `window`/`target` arguments, surfaced as typed fields in Discord's command
 UI.

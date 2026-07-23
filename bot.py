@@ -170,7 +170,7 @@ async def _handle_steam_links(message: discord.Message) -> None:
 
 
 # --- Command core -----------------------------------------------------------
-# The actual recall/remove/refresh logic lives in builder functions that return
+# The actual recall/remove/suggestion logic lives in builder functions that return
 # a list of `_Outbound` messages, decoupled from how they're delivered. Prefix
 # commands send them to the channel; slash commands send them back to the
 # invoking user as ephemeral followups. This keeps the two front-ends in sync.
@@ -260,6 +260,7 @@ def _build_games(window: str) -> list[_Outbound]:
 
 async def _build_suggest() -> list[_Outbound]:
     """Random game-night picks — the same message as the weekly announcement."""
+    await _recheck_unreleased()
     picks = _suggest_picks()
     if picks is None:
         return [_Outbound(content="No games stored yet.")]
@@ -269,6 +270,7 @@ async def _build_suggest() -> list[_Outbound]:
 
 async def _build_pick() -> list[_Outbound]:
     """Pick a single game to play — like `!suggest`, but decides on just one."""
+    await _recheck_unreleased()
     picks = _suggest_picks(1)
     if picks is None:
         return [_Outbound(content="No games stored yet.")]
@@ -276,11 +278,28 @@ async def _build_pick() -> list[_Outbound]:
     return [_Outbound(content=PICK_PREAMBLE, embeds=[_suggestion_embed(picks[0])])]
 
 
+async def _recheck_unreleased() -> None:
+    """Re-fetch every game stored as not-yet-released so any that have since
+    launched become eligible before we sample.
+
+    This is *the* release check for existing games: a title added while it was
+    "coming soon" flips to released here the moment Steam reports it out. Run it
+    before `_suggest_picks` in every suggestion path (on-demand and the weekly
+    announcement); already-released games are left alone (their live price still
+    refreshes via `_refresh_picks` once sampled). A failed fetch leaves the
+    stored snapshot as-is, so an unreachable app stays unreleased and excluded.
+    """
+    for app_id in db.unreleased_app_ids():
+        details = await steam.fetch_game_details(bot.http_session, app_id)
+        if details is not None:
+            db.upsert_game(details)
+
+
 async def _refresh_picks(picks) -> None:
     """Re-fetch each pick's Steam details so the suggestion shows the live price.
 
-    Persists the fresh details (same path as `!refresh`, but scoped to the few
-    sampled games) and copies price/name/image onto the in-memory pick so the
+    Persists the fresh details (scoped to the few sampled games) and copies
+    price/name/image onto the in-memory pick so the
     embed reflects it without a re-query. A failed fetch leaves the stored
     snapshot in place. Keep this before `_announcement_message` in both the
     on-demand and scheduled paths so the two stay in step.
@@ -295,6 +314,7 @@ async def _refresh_picks(picks) -> None:
         g.header_image = details.header_image
         g.is_free = details.is_free
         g.price = details.price
+        g.is_released = details.is_released
 
 
 def _build_help() -> list[_Outbound]:
@@ -311,7 +331,6 @@ def _build_help() -> list[_Outbound]:
         f"• `{p}details [window]` / `/details` — richer per-game cards: price, live "
         "review standing, image, and app id",
         f"• `{p}remove <link|id>` / `/remove` — remove a game and all its mentions",
-        f"• `{p}refresh` / `/refresh` — re-fetch Steam details for every stored game",
         f"• `{p}suggest` / `/suggest` — a few random game-night picks",
         f"• `{p}pick` / `/pick` — pick a single random game to play",
         f"• `{p}web` / `/web` — link to the voting web app",
@@ -468,18 +487,6 @@ async def _build_add(
     return [_Outbound(content="\n".join(lines))]
 
 
-async def _refresh_all() -> tuple[int, int]:
-    """Re-fetch Steam details for every stored game. Returns (updated, total)."""
-    app_ids = db.all_app_ids()
-    updated = 0
-    for app_id in app_ids:
-        details = await steam.fetch_game_details(bot.http_session, app_id)
-        if details is not None:
-            db.upsert_game(details)
-            updated += 1
-    return updated, len(app_ids)
-
-
 def _chunk_lines(lines: list[str]) -> list[str]:
     """Group lines into messages each under Discord's 2000-char limit."""
     chunks: list[str] = []
@@ -537,18 +544,6 @@ async def remove(ctx: commands.Context, *, target: str = "") -> None:
     await _send_ctx(ctx, _build_remove(target))
 
 
-@bot.command(name="refresh")
-async def refresh(ctx: commands.Context) -> None:
-    """Re-fetch Steam details (header image, reviews, price) for every stored game."""
-    app_ids = db.all_app_ids()
-    if not app_ids:
-        await ctx.send("No games stored yet.")
-        return
-    notice = await ctx.send(f"Refreshing {len(app_ids)} game(s)…")
-    updated, total = await _refresh_all()
-    await notice.edit(content=f"Refreshed {updated}/{total} game(s).")
-
-
 @bot.command(name="suggest")
 async def suggest(ctx: commands.Context) -> None:
     """Post a few random game-night suggestions (same as the weekly announcement)."""
@@ -574,7 +569,7 @@ async def help_cmd(ctx: commands.Context) -> None:
 
 
 # --- Slash commands (reply privately to the invoking user) ------------------
-# Each defers ephemerally first: the recall/refresh paths hit Steam's API and
+# Each defers ephemerally first: the recall/suggestion paths hit Steam's API and
 # would otherwise blow past the 3-second interaction-response deadline.
 
 
@@ -629,22 +624,6 @@ async def slash_add(interaction: discord.Interaction, target: str) -> None:
 async def slash_remove(interaction: discord.Interaction, target: str) -> None:
     await interaction.response.defer(ephemeral=True)
     await _send_interaction(interaction, _build_remove(target))
-
-
-@bot.tree.command(
-    name="refresh",
-    description="Re-fetch Steam details for every stored game (private reply)",
-    guild=WATCH_GUILD,
-)
-async def slash_refresh(interaction: discord.Interaction) -> None:
-    await interaction.response.defer(ephemeral=True)
-    updated, total = await _refresh_all()
-    if total == 0:
-        await interaction.followup.send("No games stored yet.", ephemeral=True)
-    else:
-        await interaction.followup.send(
-            f"Refreshed {updated}/{total} game(s).", ephemeral=True
-        )
 
 
 @bot.tree.command(
@@ -717,8 +696,14 @@ def _parse_hhmm(text: str) -> tuple[int, int] | None:
 
 
 def _suggest_picks(count: int = ANNOUNCE_PICKS):
-    """Random sample of up to `count` stored games, or None if none stored."""
-    games = db.all_games()
+    """Random sample of up to `count` stored games, or None if none stored.
+
+    Only released games are eligible — a not-yet-out title can't be played on
+    game night, so it's excluded. Early-access games are released and stay in
+    (see `GameDetails.is_released`). Callers run `_recheck_unreleased` first so a
+    game that has since launched is already flipped to released by this point.
+    """
+    games = [g for g in db.all_games() if g.is_released]
     if not games:
         return None
     return random.sample(games, min(count, len(games)))
@@ -758,6 +743,7 @@ async def announce_loop() -> None:
     channel = bot.get_channel(WATCH_CHANNEL_ID)
     if channel is None:
         return
+    await _recheck_unreleased()
     picks = _suggest_picks()
     if picks is None:
         return

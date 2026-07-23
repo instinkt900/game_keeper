@@ -37,6 +37,7 @@ class GameDetails:
     header_image: str
     is_free: bool
     price: str | None  # human-readable, e.g. "$19.99", or None if free/unknown
+    is_released: bool  # False only for not-yet-out titles; True for early access
     review_summary: str | None  # e.g. "Very Positive", or None if no reviews yet
     review_total: int  # total number of reviews
     review_positive_pct: int | None  # 0-100, or None if no reviews yet
@@ -73,6 +74,11 @@ async def fetch_game_details(
     if not data.get("is_free") and "price_overview" in data:
         price = data["price_overview"].get("final_formatted")
 
+    # `coming_soon` is Steam's "not out yet" flag. It's False for released games,
+    # including early-access titles that are already playable, and True only for
+    # unreleased ones — exactly the "can't be played yet" distinction we want.
+    is_released = not bool(data.get("release_date", {}).get("coming_soon", False))
+
     reviews = await fetch_review_summary(session, app_id)
     summary, total, positive_pct = reviews if reviews is not None else (None, 0, None)
 
@@ -84,6 +90,7 @@ async def fetch_game_details(
         header_image=data.get("header_image", ""),
         is_free=bool(data.get("is_free")),
         price=price,
+        is_released=is_released,
         review_summary=summary,
         review_total=total,
         review_positive_pct=positive_pct,

@@ -32,15 +32,17 @@ Discord commands (windows: `5d`, `12h`, …; default `7d`, or `all`): `!games
 time filter, lists every stored game, and annotates each with how long it's been
 on the list) and `!details <window>` (rich
 per-game embeds, with live review refresh); `!remove <link|id>` (delete a game
-and its mentions); `!refresh` (re-fetch details for every stored game);
-`!suggest` (a few random game-night picks, the same message the weekly
+and its mentions); `!suggest` (a few random game-night picks, the same message
+the weekly
 announcement posts); `!pick` (like `!suggest` but commits to a single game, with
 a "you will be playing…" reply); `!web` (advertise the voting web app's URL, from
 the optional `WEB_APP_URL`); `!help` (a short blurb plus the command list —
 our own, since the `Bot` is built with `help_command=None` to drop discord.py's
-default). All eight
+default). There is deliberately **no manual refresh command** — stored details
+are re-fetched on demand where they matter (see the release re-check and
+`_refresh_picks` in Architecture). All seven
 also exist as guild-scoped **slash commands** (`/games`, `/details`, `/remove`,
-`/refresh`, `/suggest`, `/pick`, `/web`, `/help`) that reply ephemerally to the invoking user instead of posting to
+`/suggest`, `/pick`, `/web`, `/help`) that reply ephemerally to the invoking user instead of posting to
 the channel; both front-ends share the same core logic (see Architecture). The
 bot must be invited with the `applications.commands` OAuth scope for the slash
 commands to appear. One command is **slash-only**: `/add <link|id>` adds a game
@@ -124,13 +126,14 @@ all`, which skips the filter and uses `db.all_games()`). `!details` then
 refreshes review standing live per game (`fetch_review_summary` +
 `update_reviews`) and renders one embed each; `!games` just sorts A–Z and sends
 a compact text list. Review refresh is intentionally live-at-call (sentiment
-drifts); price/header image stay as snapshots from ingest/`!refresh`.
+drifts); price/header image stay as snapshots from ingest, re-fetched only where
+they matter (the suggestion paths — see `_recheck_unreleased`/`_refresh_picks`).
 
 ## Conventions and gotchas
 
 - **Most commands have two front-ends sharing one core.** Command logic lives in
   `_build_games` / `_build_details` / `_build_remove` / `_build_add` /
-  `_build_help` (and `_refresh_all`), which return a list of `_Outbound`
+  `_build_help`, which return a list of `_Outbound`
   (content and/or embeds) and never touch Discord I/O directly. The prefix command sends those via `_send_ctx` (to the
   channel); the slash command defers ephemerally and sends via
   `_send_interaction` (`followup.send(..., ephemeral=True)`). `_build_add` is the
@@ -163,9 +166,9 @@ drifts); price/header image stay as snapshots from ingest/`!refresh`.
   `Australia/Sydney` would shift the wall-clock time half the year. Requires the
   `tzdata` package for `ZoneInfo` on slim images. The on-demand `!suggest` /
   `/suggest` command and the scheduled loop both build their message from the
-  shared `_suggest_picks(count)` (random sample) + `_refresh_picks` (live
-  re-fetch) + `_announcement_message` helpers, so the two stay identical — change
-  those, not one call site. `_announcement_message` appends a pointer to the
+  shared `_recheck_unreleased` (release re-check) + `_suggest_picks(count)`
+  (random sample) + `_refresh_picks` (live re-fetch) + `_announcement_message`
+  helpers, so the two stay identical — change those, not one call site. `_announcement_message` appends a pointer to the
   voting web app when the optional `WEB_APP_URL` env var is set (URL wrapped in
   `<...>` to suppress its preview embed); unset, the line is omitted so the bot
   runs fine without the web app. `!pick` / `/pick` (`_build_pick`) reuses the same
@@ -179,10 +182,25 @@ drifts); price/header image stay as snapshots from ingest/`!refresh`.
   preview (the same reason `_compact_line` wraps URLs in `<...>`).
   `ANNOUNCE_PICKS` (3) stays well under Discord's 10-embeds cap. Suggestions are
   the one place price is refreshed live: `_refresh_picks` re-fetches each sampled
-  game (same path as `!refresh`, scoped to the picks), upserts it, and copies the
+  game (scoped to the picks), upserts it, and copies the
   fresh price/name/image onto the in-memory pick so a current sale shows — a
   failed fetch keeps the stored snapshot. Because it fetches Steam, `_build_suggest`
   is async and the `/suggest` handler must `defer` first.
+- **Only released games are suggested, and the release check self-heals.**
+  `GameDetails.is_released` comes from Steam's `release_date.coming_soon` flag
+  (`coming_soon: true` → not released) and is stored per game; it's `False` only
+  for not-yet-out titles, so already-playable **early access** counts as
+  released. `_suggest_picks` filters to `is_released` before sampling, so
+  unreleased games are never suggested. A game added while unreleased would
+  otherwise stay stuck (the filter excludes it, so `_refresh_picks` — which only
+  touches *sampled* games — never re-checks it), so every suggestion path runs
+  `_recheck_unreleased` **first**: it re-fetches exactly the games stored as
+  unreleased (`db.unreleased_app_ids()`) and upserts them, flipping any that have
+  since launched to released just before `_suggest_picks` filters. This is why
+  there's no manual refresh command — release status (and, for sampled picks,
+  price) is brought current on demand. The `is_released` column defaults to `1`
+  (released) via `_MIGRATIONS`, so pre-existing games are assumed playable until
+  a fetch fills in the real value.
 - **Timestamps are always stored as ISO-8601 UTC.** `record_mention` uses
   `message.created_at` (the Discord message time, not "now"), and all
   comparisons normalize via `.astimezone(timezone.utc)`. Keep this invariant —
