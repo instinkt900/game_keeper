@@ -73,10 +73,14 @@ flat structure:
   channel. Link capture is *also* skipped when the message is a valid command
   (`ctx.valid`): otherwise `!remove <steam_url>` would capture the game from its
   own argument's auto-embed and then remove it. Capture reacts 🎮
-  (`REACTION_ADDED`) when a genuinely new game is stored and 👀
-  (`REACTION_ALREADY`) when a linked game was already on the list — both can
-  appear on a message mixing new and already-tracked links. A mention is recorded
-  either way (the poster is credited even for an already-listed game). Owns the shared `aiohttp.ClientSession` (created in `setup_hook`,
+  (`REACTION_ADDED`) when a genuinely new game is stored, 👀
+  (`REACTION_ALREADY`) when a linked game was already on the list, and 🧍
+  (`REACTION_SOLO`) when a linked game was ignored for being single-player-only
+  (no co-op category — see `GameDetails.is_coop`) — several can
+  appear on a message mixing new, already-tracked, and single-player links. A
+  mention is recorded for a tracked game
+  either way (the poster is credited even for an already-listed game); a
+  single-player game is never stored and records no mention. Owns the shared `aiohttp.ClientSession` (created in `setup_hook`,
   attached as `bot.http_session`) and a single module-level `Database` instance.
   `setup_hook` also `bot.tree.sync(guild=WATCH_GUILD)`s the slash commands —
   guild-scoped so syncs are instant (global syncs take up to an hour).
@@ -84,7 +88,12 @@ flat structure:
   IDs from message text (handles both `store.steampowered.com` and
   `steamcommunity.com` `/app/<id>` URLs, deduped in order); `fetch_game_details`
   calls Steam's public `appdetails` endpoint and returns a `GameDetails`
-  dataclass, or `None` for delisted/region-locked apps. Review standing comes
+  dataclass, or `None` for delisted/region-locked apps. `GameDetails.is_coop` is
+  derived from the endpoint's structured `categories` list (a substring match on
+  "co-op" catches "Co-op"/"Online Co-op"/"Shared/Split Screen Co-op"; store user
+  *tags* aren't in this endpoint) — the bot uses it to ignore single-player-only
+  games during *passive channel capture only* (explicit `/add` bypasses the
+  gate). Review standing comes
   from a *separate* endpoint (`appreviews`) via `fetch_review_summary`, which is
   tri-state: `None` = request failed (caller keeps stored value), `(None, total,
   None)` = genuinely no reviews, `(summary, total, pct)` = usable standing.
@@ -114,8 +123,11 @@ flat structure:
   `docker-compose.yml`'s `web` service). Templates live in `templates/`.
 
 Data flow: Steam link posted → `extract_app_ids` → `fetch_game_details` →
-`upsert_game` + `record_mention` → 🎮 (new) / 👀 (already listed) reaction. `/add` (`_build_add`, slash-only)
-drives the same `upsert_game` + `record_mention` path from the slash argument
+(co-op gate: skip if `not is_coop`) → `upsert_game` + `record_mention` → 🎮 (new)
+/ 👀 (already listed) / 🧍 (single-player, ignored) reaction. `/add` (`_build_add`, slash-only)
+drives the same `upsert_game` + `record_mention` path from the slash
+argument — but *without* the co-op gate, since `/add` is an explicit request to
+track a game (a single-player pick is honored) —
 instead of a posted message, with the actor taken from `interaction.user` rather
 than `message.author`. Because a slash interaction has no linkable channel
 message, `_build_add` stores the *negated* interaction id as the mention's

@@ -12,6 +12,8 @@ be recalled later.
   price, description, and header image.
 - Records every mention (who, when, which message), reacting with 🎮 when a new
   game is added, or 👀 when the linked game is already on the list.
+- Only tracks games that support **co-op** — single-player-only games are
+  ignored (reacting 🧍) so they never end up on the list or in suggestions.
 
 ## Commands
 
@@ -40,7 +42,9 @@ UI.
 There's also a slash-only **`/add <link|id>`** for adding a game without posting
 its link in the channel (posting a Steam link in the watched channel already
 captures it, so there's no `!add`). It's handy for adding a game you found
-elsewhere, privately. Since there's no channel message behind a `/add` entry,
+elsewhere, privately. Unlike passive channel capture, `/add` **skips the co-op
+check** — it's an explicit request, so a single-player game you deliberately add
+is honored. Since there's no channel message behind a `/add` entry,
 your name shows as plain text in the recall list rather than a clickable
 jump-back link.
 

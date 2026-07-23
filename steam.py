@@ -38,6 +38,7 @@ class GameDetails:
     is_free: bool
     price: str | None  # human-readable, e.g. "$19.99", or None if free/unknown
     is_released: bool  # False only for not-yet-out titles; True for early access
+    is_coop: bool  # has a co-op category (Co-op / Online / Shared-Split-Screen)
     review_summary: str | None  # e.g. "Very Positive", or None if no reviews yet
     review_total: int  # total number of reviews
     review_positive_pct: int | None  # 0-100, or None if no reviews yet
@@ -79,6 +80,15 @@ async def fetch_game_details(
     # unreleased ones — exactly the "can't be played yet" distinction we want.
     is_released = not bool(data.get("release_date", {}).get("coming_soon", False))
 
+    # Co-op standing comes from the structured `categories` list (the store's
+    # user *tags* aren't in this endpoint). Steam labels it "Co-op", "Online
+    # Co-op", and "Shared/Split Screen Co-op"; a substring match on "co-op"
+    # catches all three (descriptions are English because we pass l=english).
+    categories = data.get("categories") or []
+    is_coop = any(
+        "co-op" in (c.get("description") or "").lower() for c in categories
+    )
+
     reviews = await fetch_review_summary(session, app_id)
     summary, total, positive_pct = reviews if reviews is not None else (None, 0, None)
 
@@ -91,6 +101,7 @@ async def fetch_game_details(
         is_free=bool(data.get("is_free")),
         price=price,
         is_released=is_released,
+        is_coop=is_coop,
         review_summary=summary,
         review_total=total,
         review_positive_pct=positive_pct,

@@ -44,6 +44,7 @@ MAX_GAMES_SHOWN = 20
 # Reactions left on a message that links Steam games.
 REACTION_ADDED = "🎮"    # at least one genuinely new game was captured
 REACTION_ALREADY = "👀"  # a linked game was already on the list (seen, not re-added)
+REACTION_SOLO = "🧍"     # a linked game was ignored: no co-op, single-player only
 
 # Weekly "game night" announcement. The time-of-day is configurable at runtime
 # (stored in the DB); the timezone and weekday are fixed. Australia/Brisbane is
@@ -140,9 +141,15 @@ async def _handle_steam_links(message: discord.Message) -> None:
     already = set(db.all_app_ids())
     added = False
     existed = False
+    solo = False
     for app_id in app_ids:
         details = await steam.fetch_game_details(bot.http_session, app_id)
         if details is None:
+            continue
+        # Ignore single-player-only games: only games with a co-op category are
+        # tracked. Skip storing and recording the mention entirely.
+        if not details.is_coop:
+            solo = True
             continue
         was_present = app_id in already
         db.upsert_game(details)
@@ -161,12 +168,14 @@ async def _handle_steam_links(message: discord.Message) -> None:
             added = True
             already.add(app_id)
 
-    # 🎮 = something new was added; 👀 = a link was already on the list. A message
-    # mixing new and already-tracked links can get both.
+    # 🎮 = something new was added; 👀 = a link was already on the list; 🧍 = a
+    # single-player-only game was ignored. A message mixing these can get several.
     if added:
         await message.add_reaction(REACTION_ADDED)
     if existed:
         await message.add_reaction(REACTION_ALREADY)
+    if solo:
+        await message.add_reaction(REACTION_SOLO)
 
 
 # --- Command core -----------------------------------------------------------
@@ -465,6 +474,8 @@ async def _build_add(
         if details is None:
             failed.append(app_id)
             continue
+        # No co-op gate here: unlike passive channel capture, `/add` is an
+        # explicit request to track this game, so a single-player pick is honored.
         db.upsert_game(details)
         # Record the mention regardless so the caller is credited even for a game
         # already on the list; bucket the reply by whether it was already stored.
